@@ -1,0 +1,139 @@
+# Sonic AI Training Configuration - Optimized for RTX 2060 + i7-9750H + 40GB RAM
+
+# Game Settings
+game:
+  name: "sonic1"  # sonic1, sonic2, sonic3
+  rom_path: "roms/sonic1.md"  # Use the working ROM file
+  frame_skip: 4  # Skip frames for faster training
+  max_steps: 15000  # Increased for longer episodes
+  render: false  # Render during training
+
+# Environment Settings
+environment:
+  screen_width: 224
+  screen_height: 256
+  grayscale: true
+  stack_frames: 4  # Number of frames to stack for temporal information
+  normalize_obs: true
+  reward_scale: 1.0
+
+# Agent Settings - Optimized for RTX 2060
+agent:
+  type: "ppo"  # ppo, a2c, dqn
+  learning_rate: 0.00025  # Slightly lower for stability
+  batch_size: 128  # Increased for RTX 2060 (6GB VRAM)
+  buffer_size: 50000  # Increased buffer size
+  gamma: 0.99  # Discount factor
+  gae_lambda: 0.95  # GAE lambda parameter
+  clip_range: 0.2
+  ent_coef: 0.01  # Entropy coefficient for exploration
+  vf_coef: 0.5  # Value function coefficient
+  max_grad_norm: 0.5
+  n_steps: 2048  # PPO steps per update
+
+# Network Architecture - Optimized for RTX 2060
+network:
+  type: "mlp"  # cnn, mlp, cnn_lstm
+  cnn_features: [32, 64, 128, 512]  # Deeper network for RTX 2060
+  mlp_layers: [512, 256, 128]
+  lstm_hidden_size: 256
+  activation: "relu"  # relu, tanh, leaky_relu
+
+# Training Settings - Optimized for 40GB RAM
+training:
+  total_timesteps: 2000000  # Increased for better learning
+  save_interval: 50000  # Save more frequently
+  eval_interval: 25000  # Evaluate more frequently
+  log_interval: 100
+  checkpoint_dir: "models/"
+  log_dir: "logs/"
+  
+# Reward Function - Comprehensive Behavioral Psychology Implementation
+rewards:
+  # Positive Reinforcement (Adding good stimulus)
+  ring_collected: 15.0  # Reward for collecting rings
+  enemy_defeated: 8.0   # Reward for defeating enemies
+  power_up_collected: 20.0  # Reward for power-ups
+  level_completed: 1500.0  # Large reward for completing level
+  checkpoint_reached: 100.0  # Reward for reaching checkpoints
+  
+  # Positive Punishment (Adding bad stimulus)
+  game_over: -200.0  # Heavy penalty for losing all lives
+  fall_penalty: -15.0  # Penalty for falling into pits
+  stuck_penalty: -2.0  # Penalty for being stuck
+  
+  # Negative Reinforcement (Removing bad stimulus)
+  forward_progress: 2.0  # Reward for moving right (removes time pressure)
+  speed_bonus: 3.0  # Reward for high speed (removes slow movement penalty)
+  height_bonus: 1.0  # Reward for jumping (removes ground obstacle penalty)
+  
+  # Negative Punishment (Removing good stimulus)
+  time_penalty: -0.2  # Small penalty for time passing (removes time bonus)
+  ring_loss_penalty: -5.0  # Penalty for losing rings (removes ring bonus)
+  
+  # Advanced Behavioral Incentives
+  exploration_bonus: 1.0  # Reward for visiting new areas
+  efficiency_bonus: 2.0  # Reward for completing level quickly
+  skill_bonus: 5.0  # Reward for advanced moves (spin dash, homing attack)
+
+# Observation Processing
+observation:
+  resize: [84, 84]  # Resize observation to this size
+  crop: [0, 0, 224, 256]  # Crop region [x, y, width, height]
+  normalize: true
+  frame_stack: 4
+
+# Action Space
+actions:
+  basic:
+    - "NOOP"
+    - "LEFT"
+    - "RIGHT"
+    - "UP"
+    - "DOWN"
+    - "A"  # Jump
+    - "B"  # Spin dash
+    - "START"
+    - "SELECT"
+  combinations:
+    - ["LEFT", "A"]  # Jump left
+    - ["RIGHT", "A"]  # Jump right
+    - ["DOWN", "B"]  # Spin dash
+    - ["LEFT", "DOWN", "B"]  # Spin dash left
+    - ["RIGHT", "DOWN", "B"]  # Spin dash right
+
+# Logging and Visualization
+logging:
+  tensorboard: true
+  wandb: false  # Set to true to use Weights & Biases
+  save_videos: true
+  video_fps: 30
+  log_episode_rewards: true
+  log_episode_lengths: true
+  log_episode_scores: true
+  log_episode_rings: true
+  log_episode_lives: true
+  log_training_loss: true
+  log_learning_rate: true
+
+# Hardware Settings - Optimized for RTX 2060 + i7-9750H + 40GB RAM
+hardware:
+  device: "cuda"  # Use CUDA for RTX 2060
+  num_envs: 4  # Multiple environments for parallel training
+  num_threads: 8  # Use 8 threads (6 physical cores + 2 hyperthreads)
+  gpu_memory_fraction: 0.8  # Use 80% of GPU memory (4.8GB of 6GB)
+
+# Evaluation Settings
+evaluation:
+  eval_freq: 25000
+  n_eval_episodes: 10  # More episodes for better evaluation
+  deterministic: true
+  render: true
+
+# Emulator Settings
+emulator:
+  path: "C:\\RetroArch-Win64\\retroarch.exe"
+  core: "genesis_plus_gx_libretro.dll"  # Updated to use the correct core
+  window_size: [800, 600]
+  fullscreen: false
+  audio: false  # Disable audio for faster training 

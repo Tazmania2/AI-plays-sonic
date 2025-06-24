@@ -1,0 +1,2 @@
+# This file ensures the roms directory is tracked by git
+# while the actual ROM files (*.md, *.smc, etc.) are ignored 

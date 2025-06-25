@@ -12,16 +12,20 @@ import sys
 import yaml
 import time
 import logging
+import csv
+import json
 from pathlib import Path
 from typing import Dict, Any, Optional
-
-import numpy as np
+import multiprocessing
+import psutil
 import torch
 from stable_baselines3 import PPO, A2C, DQN
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.logger import configure
+from stable_baselines3.common.logger import configure as sb3_configure
+import numpy as np
+from datetime import datetime
 
 # Add project root to path
 sys.path.append(str(Path(__file__).parent))
@@ -30,6 +34,7 @@ from environment.sonic_env import SonicEnvironment
 from utils.observation_processor import SonicSpecificProcessor
 from utils.reward_calculator import SonicSpecificRewardCalculator
 from visualization.training_visualizer import TrainingVisualizer
+from environment.hierarchical_shaping_wrapper import HierarchicalShapingWrapper
 
 
 def setup_logging(log_dir: str, level: str = "INFO") -> logging.Logger:
@@ -165,30 +170,138 @@ def create_callbacks(config: Dict[str, Any], eval_env) -> list:
     return callbacks
 
 
-def train_agent(agent, env, config: Dict[str, Any], callbacks: list, logger: logging.Logger):
-    """Train the agent."""
+def log_episode_metrics(metrics, log_dir, mode):
+    """Log per-episode metrics to CSV and TensorBoard."""
+    csv_path = os.path.join(log_dir, f"{mode}.csv")
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, 'a', newline='') as csvfile:
+        fieldnames = list(metrics.keys())
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(metrics)
+    # TensorBoard logging
+    tb_log_dir = os.path.join(log_dir, mode)
+    tb_logger = sb3_configure(tb_log_dir, ['tensorboard'])
+    for k, v in metrics.items():
+        if isinstance(v, (int, float)):
+            tb_logger.record(k, v)
+    tb_logger.dump(metrics.get('step', 0))
+
+
+def train_agent(agent, env, config, callbacks, logger, log_dir=None, mode='baseline'):
+    """Train the agent with enhanced logging and objective detection."""
+    print(f"Starting {mode} training...")
+    
+    # Setup logging files
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_filename = f"logs/{mode}_training_{timestamp}.csv"
+    json_filename = f"logs/{mode}_training_{timestamp}.json"
+    session_summary_filename = f"logs/{mode}_session_summary_{timestamp}.json"
+    
+    # Ensure logs directory exists
+    os.makedirs("logs", exist_ok=True)
+    
+    # Session tracking
+    session_data = {
+        "mode": mode,
+        "start_time": datetime.now().isoformat(),
+        "config": config,
+        "episodes": [],
+        "objective_completed": False,
+        "final_progress": 0.0,
+        "total_reward": 0.0,
+        "total_steps": 0
+    }
+    
     training_config = config['training']
-    
-    logger.info(f"Starting training for {training_config['total_timesteps']} timesteps")
-    logger.info(f"Agent: {config['agent']['type']}")
-    logger.info(f"Game: {config['game']['name']}")
-    
     start_time = time.time()
+    episode = 0
+    obs = env.reset()
+    # Handle tuple return from environment reset (obs, info)
+    if isinstance(obs, tuple):
+        obs, _ = obs
+    done, truncated = False, False
+    episode_metrics = None
     
-    try:
-        agent.learn(
-            total_timesteps=training_config['total_timesteps'],
-            callback=callbacks,
-            progress_bar=True
-        )
-    except KeyboardInterrupt:
-        logger.info("Training interrupted by user")
-    except Exception as e:
-        logger.error(f"Training error: {e}")
-        raise
+    print(f"Training for {training_config['total_timesteps']} timesteps...")
     
-    training_time = time.time() - start_time
-    logger.info(f"Training completed in {training_time:.2f} seconds")
+    for step in range(training_config['total_timesteps']):
+        action, _ = agent.predict(obs, deterministic=False)
+        result = env.step(action)
+        if len(result) == 5:
+            obs, reward, done, truncated, info = result
+        else:
+            obs, reward, done, info = result
+            truncated = False
+
+        # Robust check for episode termination
+        done_flag = (np.any(done) if isinstance(done, (np.ndarray, list)) else bool(done))
+        truncated_flag = (np.any(truncated) if isinstance(truncated, (np.ndarray, list)) else bool(truncated))
+        
+        # Check for objective completion
+        objective_completed = False
+        objective_progress = 0.0
+        if hasattr(env, 'check_objective_completed'):
+            objective_completed = env.check_objective_completed()
+        if hasattr(env, 'get_objective_progress'):
+            objective_progress = env.get_objective_progress()
+        
+        if done_flag or truncated_flag:
+            episode += 1
+            # Handle info from vectorized environments (list of dicts)
+            if isinstance(info, list):
+                info_dict = info[0] if info else {}
+            else:
+                info_dict = info
+            # Collect metrics from info
+            episode_metrics = {
+                'episode': episode,
+                'step': step,
+                'total_reward': info_dict.get('episode', {}).get('r', 0),
+                'episode_length': info_dict.get('episode', {}).get('l', 0),
+                'objective_progress': objective_progress,
+                'objective_completed': objective_completed,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            # Log episode metrics
+            log_metrics_to_csv(episode_metrics, csv_filename)
+            log_metrics_to_json(episode_metrics, json_filename)
+            
+            # Update session data
+            session_data["episodes"].append(episode_metrics)
+            session_data["total_reward"] += episode_metrics['total_reward']
+            session_data["total_steps"] += episode_metrics['episode_length']
+            session_data["final_progress"] = max(session_data["final_progress"], objective_progress)
+            
+            if objective_completed:
+                session_data["objective_completed"] = True
+                print(f"🎉 OBJECTIVE COMPLETED! Episode {episode} - End of Green Hill Zone Act 3 reached!")
+                break
+            
+            if log_dir:
+                log_episode_metrics(episode_metrics, log_dir, mode)
+            obs = env.reset()
+            # Handle tuple return from environment reset (obs, info)
+            if isinstance(obs, tuple):
+                obs, _ = obs
+    
+    # Finalize session data
+    session_data["end_time"] = datetime.now().isoformat()
+    session_data["duration_seconds"] = time.time() - start_time
+    session_data["total_episodes"] = episode
+    
+    # Log session summary
+    log_training_session_summary(session_data, session_summary_filename)
+    
+    print(f"Training completed!")
+    print(f"Session summary saved to: {session_summary_filename}")
+    print(f"Episode data saved to: {csv_filename} and {json_filename}")
+    print(f"Objective completed: {session_data['objective_completed']}")
+    print(f"Final progress: {session_data['final_progress']:.2%}")
+    print(f"Total episodes: {episode}")
+    print(f"Total reward: {session_data['total_reward']:.2f}")
     
     return agent
 
@@ -202,6 +315,69 @@ def save_final_model(agent, config: Dict[str, Any], logger: logging.Logger):
     
     agent.save(model_path)
     logger.info(f"Final model saved to {model_path}")
+
+
+class EnvThunk:
+    def __init__(self, config, render, shaping_phase_steps, mode):
+        self.config = config
+        self.render = render
+        self.shaping_phase_steps = shaping_phase_steps
+        self.mode = mode
+    def __call__(self):
+        env = create_environment(self.config, render=self.render)
+        return HierarchicalShapingWrapper(env, reward_mode=self.mode, shaping_phase_steps=self.shaping_phase_steps)
+
+
+def ab_train_process(config, env_fns, agent_type, log_dir, mode, render, shaping_phase_steps, logger, cpu_cores=None, gpu_mem_fraction=None):
+    # Set CPU affinity
+    if cpu_cores is not None:
+        p = psutil.Process()
+        try:
+            p.cpu_affinity(cpu_cores)
+        except Exception as e:
+            logger.warning(f"Could not set CPU affinity: {e}")
+    # Set per-process GPU memory fraction (PyTorch)
+    if torch.cuda.is_available() and gpu_mem_fraction is not None:
+        try:
+            torch.cuda.set_per_process_memory_fraction(gpu_mem_fraction)
+        except Exception as e:
+            logger.warning(f"Could not set GPU memory fraction: {e}")
+    env = DummyVecEnv(env_fns)
+    agent = create_agent(agent_type, env, config)
+    train_agent(agent, env, config, [], logger, log_dir=log_dir, mode=mode)
+    save_final_model(agent, config, logger)
+    env.close()
+
+
+def log_metrics_to_csv(metrics, filename):
+    """Log metrics to CSV file."""
+    file_exists = os.path.exists(filename)
+    with open(filename, 'a', newline='') as csvfile:
+        fieldnames = list(metrics.keys())
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(metrics)
+
+
+def log_metrics_to_json(metrics, filename):
+    """Log metrics to JSON file."""
+    data = []
+    if os.path.exists(filename):
+        with open(filename, 'r') as f:
+            data = json.load(f)
+    
+    data.append(metrics)
+    
+    with open(filename, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def log_training_session_summary(session_data, filename):
+    """Log complete training session summary to JSON."""
+    with open(filename, 'w') as f:
+        json.dump(session_data, f, indent=2)
 
 
 def main():
@@ -218,7 +394,11 @@ def main():
     parser.add_argument("--eval", action="store_true", help="Enable evaluation")
     parser.add_argument("--log-level", type=str, default="INFO",
                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
-    
+    # New CLI flags
+    parser.add_argument("--reward_mode", type=str, choices=["baseline", "shaping", "both"], default="baseline",
+                        help="Reward mode: baseline, shaping, or both (A/B test)")
+    parser.add_argument("--num_envs", type=int, default=8, help="Number of parallel environments")
+    parser.add_argument("--shaping_phase_steps", type=int, default=500_000, help="Steps for shaping phase")
     args = parser.parse_args()
     
     # Load configuration
@@ -230,8 +410,11 @@ def main():
     if args.agent:
         config['agent']['type'] = args.agent
     if args.episodes:
-        # Convert episodes to timesteps (rough estimate)
         config['training']['total_timesteps'] = args.episodes * 1000
+    # New CLI overrides
+    config['reward_mode'] = args.reward_mode
+    config['num_envs'] = args.num_envs
+    config['shaping_phase_steps'] = args.shaping_phase_steps
     
     # Create directories
     os.makedirs(config['training']['checkpoint_dir'], exist_ok=True)
@@ -255,36 +438,48 @@ def main():
     
     try:
         # Create environments
-        logger.info("Creating training environment...")
-        train_env = create_environment(config, render=args.render)
-        
-        eval_env = None
-        if args.eval:
-            logger.info("Creating evaluation environment...")
-            eval_config = config.copy()
-            eval_config['game']['render'] = True
-            eval_env = create_environment(eval_config, render=True)
-        
-        # Create agent
-        logger.info(f"Creating {config['agent']['type']} agent...")
-        agent = create_agent(config['agent']['type'], train_env, config)
-        
-        # Create callbacks
-        callbacks = create_callbacks(config, eval_env)
-        
-        # Train agent
-        agent = train_agent(agent, train_env, config, callbacks, logger)
-        
-        # Save final model
-        save_final_model(agent, config, logger)
-        
-        # Close environments
-        train_env.close()
-        if eval_env:
-            eval_env.close()
-        
-        logger.info("Training completed successfully!")
-        
+        logger.info("Creating training environment(s)...")
+        if args.reward_mode == "both":
+            n_envs = args.num_envs
+            n_envs_baseline = n_envs // 2
+            n_envs_shaping = n_envs - n_envs_baseline
+            # Use EnvThunk for Windows compatibility
+            env_fns_baseline = [EnvThunk(config, args.render, args.shaping_phase_steps, 'baseline') for _ in range(n_envs_baseline)]
+            env_fns_shaping = [EnvThunk(config, args.render, args.shaping_phase_steps, 'shaping') for _ in range(n_envs_shaping)]
+            # CPU affinity: baseline (0,1,2,6,7,8), shaping (3,4,5,9,10,11)
+            baseline_cores = [0,1,2,6,7,8]
+            shaping_cores = [3,4,5,9,10,11]
+            gpu_mem_fraction = 0.45  # Each process gets ~45% of GPU
+            logger.info("Launching parallel A/B training processes with CPU affinity and GPU memory split...")
+            baseline_proc = multiprocessing.Process(
+                target=ab_train_process,
+                args=(config, env_fns_baseline, 'ppo', config['training']['log_dir'], "baseline", args.render, args.shaping_phase_steps, logger, baseline_cores, gpu_mem_fraction)
+            )
+            shaping_proc = multiprocessing.Process(
+                target=ab_train_process,
+                args=(config, env_fns_shaping, 'ppo', config['training']['log_dir'], "shaping", args.render, args.shaping_phase_steps, logger, shaping_cores, gpu_mem_fraction)
+            )
+            baseline_proc.start()
+            shaping_proc.start()
+            baseline_proc.join()
+            shaping_proc.join()
+            logger.info("A/B training completed!")
+            return
+        else:
+            # Single reward mode
+            base_env = create_environment(config, render=args.render)
+            env = HierarchicalShapingWrapper(base_env, reward_mode=args.reward_mode, shaping_phase_steps=args.shaping_phase_steps)
+            # Create agent
+            logger.info(f"Creating {config['agent']['type']} agent...")
+            agent = create_agent(config['agent']['type'], env, config)
+            # Create callbacks
+            callbacks = create_callbacks(config, None)
+            # Train agent
+            agent = train_agent(agent, env, config, callbacks, logger, log_dir=config['training']['log_dir'], mode=args.reward_mode)
+            # Save final model
+            save_final_model(agent, config, logger)
+            env.close()
+            logger.info("Training completed successfully!")
     except Exception as e:
         logger.error(f"Training failed: {e}")
         raise

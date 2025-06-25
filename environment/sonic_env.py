@@ -171,13 +171,20 @@ class SonicEnvironment(gym.Env):
         # Reset emulator
         self.emulator.reset()
         
-        # Randomize number of START presses between 3 and 10
+        # Randomize number of START presses between 3 and 10 to skip menu
         n_start_presses = random.randint(3, 10)
-        for _ in range(n_start_presses):
-            self.emulator.step(['START'])
-            time.sleep(0.15)
-            self.emulator.step(['NOOP'])
-            time.sleep(0.05)
+        print(f"Pressing START {n_start_presses} times to skip menu...")
+        
+        for i in range(n_start_presses):
+            try:
+                self.emulator.step(['START'])
+                time.sleep(0.15)  # Hold START longer
+                self.emulator.step(['NOOP'])
+                time.sleep(0.05)
+                print(f"START press {i+1}/{n_start_presses}")
+            except Exception as e:
+                print(f"START press {i+1} failed: {e}")
+                break
         
         # Reset environment state
         self.current_step = 0
@@ -194,10 +201,12 @@ class SonicEnvironment(gym.Env):
         self.previous_state = self.current_state.copy()
         
         # Wait for game to stabilize
+        print("Waiting for game to stabilize...")
         for _ in range(30):  # Wait 30 frames
             self.emulator.step(['NOOP'])
             time.sleep(0.016)  # ~60 FPS
         
+        print("Environment reset complete")
         return self._get_stacked_observation(), {}
     
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
@@ -273,4 +282,54 @@ class SonicEnvironment(gym.Env):
     
     def load_state(self, path: str):
         """Load a saved game state."""
-        self.emulator.load_state(path) 
+        self.emulator.load_state(path)
+    
+    def check_objective_completed(self) -> bool:
+        """Check if the objective (end of Green Hill Zone Act 3) has been completed."""
+        try:
+            # Get current game state
+            game_state = self.emulator.get_game_state()
+            
+            # Check for level completion indicators
+            # These are typical signs that Sonic has reached the end of the act
+            if game_state.get('level_completed', False):
+                return True
+            
+            # Check if we're in the end-of-act sequence
+            # This usually involves Sonic running to the right and the screen scrolling
+            # or showing the "ACT CLEAR" screen
+            if game_state.get('game_state') == 'act_clear':
+                return True
+            
+            # Check if Sonic has reached the end position
+            # The end of Green Hill Zone Act 3 is typically around x-position 6000+
+            position = game_state.get('position', (0, 0))
+            if position[0] > 6000:  # Adjust this threshold based on actual level length
+                return True
+            
+            # Check for end-of-act music or sound effects
+            # This would require audio analysis or memory reading
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error checking objective completion: {e}")
+            return False
+
+    def get_objective_progress(self) -> float:
+        """Get progress towards the objective (0.0 to 1.0)."""
+        try:
+            game_state = self.emulator.get_game_state()
+            position = game_state.get('position', (0, 0))
+            
+            # Calculate progress based on x-position
+            # Green Hill Zone Act 3 is approximately 7000 pixels long
+            max_distance = 7000
+            current_distance = max(0, position[0])
+            
+            progress = min(1.0, current_distance / max_distance)
+            return progress
+            
+        except Exception as e:
+            print(f"Error calculating objective progress: {e}")
+            return 0.0 

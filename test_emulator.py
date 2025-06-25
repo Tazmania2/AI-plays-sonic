@@ -91,12 +91,20 @@ def test_emulator_startup(retroarch_path, core_path, rom_path):
     """Test if RetroArch can start with the core and ROM."""
     print(f"\nTesting emulator startup...")
     try:
-        print(f"Starting RetroArch with core: {core_path} and ROM: {rom_path}")
-        process = subprocess.Popen([
-            retroarch_path,
-            "-L", core_path,
-            rom_path
-        ])
+        # Get the path to the config file in the project directory
+        config_path = os.path.join(os.path.dirname(__file__), "retroarch.cfg")
+        if not os.path.exists(config_path):
+            print(f"Warning: Config file not found at {config_path}, using default RetroArch config")
+            config_path = None
+        
+        # Build command with config file
+        cmd = [retroarch_path]
+        if config_path:
+            cmd.extend(["--config", config_path])
+        cmd.extend(["-L", core_path, rom_path])
+        
+        print(f"Starting RetroArch with command: {' '.join(cmd)}")
+        process = subprocess.Popen(cmd)
         time.sleep(5)
         if process.poll() is None:
             print("✅ RetroArch started successfully!")

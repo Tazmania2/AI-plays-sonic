@@ -77,9 +77,23 @@ class SonicEmulator:
             'Y': [KeyCode.from_char('a')],  # Y (esquerda)
             'X': [KeyCode.from_char('s')],  # X (topo)
             'START': [Key.enter],
-            'SELECT': [Key.shift_r],
             'L': [KeyCode.from_char('q')],
             'R': [KeyCode.from_char('w')]
+        }
+        
+        # RetroArch quick menu hotkeys to avoid
+        self.quick_menu_hotkeys = {
+            'F1',  # RetroArch quick menu
+            'F2',  # RetroArch save state
+            'F4',  # RetroArch load state
+            'F5',  # RetroArch save state
+            'F7',  # RetroArch load state
+            'F9',  # RetroArch fast forward
+            'F10', # RetroArch rewind
+            'F11', # RetroArch fullscreen
+            'F12', # RetroArch screenshot
+            'Escape', # RetroArch menu
+            'Tab',    # RetroArch menu
         }
         
         # Initialize emulator
@@ -205,6 +219,7 @@ class SonicEmulator:
                     break
             if not retroarch_path:
                 raise FileNotFoundError("RetroArch not found. Please install RetroArch or use a different emulator.")
+            
             # Use the core path from config or default location
             core_path = self.core_path or "cores/genesis_plus_gx_libretro.dll"
             if not os.path.isabs(core_path):
@@ -221,12 +236,22 @@ class SonicEmulator:
                         break
             if not os.path.exists(core_path):
                 raise FileNotFoundError(f"RetroArch core not found: {core_path}")
-            # Start RetroArch with correct order
-            self.emulator_process = subprocess.Popen([
-                retroarch_path,
-                "-L", core_path,
-                str(self.rom_path)
-            ])
+            
+            # Get the path to the config file in the project directory
+            config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "retroarch.cfg")
+            if not os.path.exists(config_path):
+                print(f"Warning: Config file not found at {config_path}, using default RetroArch config")
+                config_path = None
+            
+            # Start RetroArch with config file and correct order
+            cmd = [retroarch_path]
+            if config_path:
+                cmd.extend(["--config", config_path])
+            cmd.extend(["-L", core_path, str(self.rom_path)])
+            
+            print(f"Starting RetroArch with command: {' '.join(cmd)}")
+            self.emulator_process = subprocess.Popen(cmd)
+            
         except Exception as e:
             print(f"Failed to start RetroArch: {e}")
             print("Please install RetroArch or use a different emulator.")
@@ -315,18 +340,32 @@ class SonicEmulator:
     
     def step(self, actions: List[str]):
         """Execute actions in the emulator."""
+        print(f"DEBUG: step() called with actions: {actions}")
+        print(f"DEBUG: Available action mappings: {list(self.action_mappings.keys())}")
         if not self.keyboard_controller:
             raise RuntimeError("Input control not initialized")
+        
+        # Focus the emulator window before sending keys
+        self._focus_emulator_window()
         
         # Release all keys first
         self._release_all_keys()
         
         # Press the specified keys
         for action in actions:
+            print(f"DEBUG: Processing action: '{action}'")
             if action in self.action_mappings:
                 keys = self.action_mappings[action]
+                print(f"Sending action '{action}' with keys: {keys}")
                 for key in keys:
-                    self.keyboard_controller.press(key)
+                    # Avoid sending quick menu hotkeys
+                    if str(key) not in self.quick_menu_hotkeys:
+                        print(f"Pressing key: {key}")
+                        self.keyboard_controller.press(key)
+                    else:
+                        print(f"Skipping quick menu hotkey: {key}")
+            else:
+                print(f"Unknown action: {action}")
         
         # Small delay to ensure action is registered
         time.sleep(0.016)  # ~60 FPS
@@ -340,32 +379,175 @@ class SonicEmulator:
                 except:
                     pass
     
-    def get_game_state(self) -> Dict[str, Any]:
-        """Get the current game state from memory."""
-        # This is a simplified version. In a real implementation,
-        # you would read memory addresses from the emulator process.
-        
-        # For now, return basic state information
-        # In practice, you'd use memory reading libraries or emulator APIs
-        return {
-            'score': 0,  # Would read from memory
-            'rings': 0,  # Would read from memory
-            'lives': 3,  # Would read from memory
-            'level': 1,  # Would read from memory
-            'position': (0, 0),  # Would read from memory
-            'game_state': 'playing',  # Would read from memory
-            'invincibility': False,  # Would read from memory
-            'speed': 0,  # Would read from memory
-            'level_completed': False,  # Would read from memory
-            'game_over': False  # Would read from memory
-        }
+    def _get_memory_reader(self):
+        """Get or create the memory reader for RetroArch."""
+        if not hasattr(self, '_memory_reader') or self._memory_reader is None:
+            from utils.retroarch_memory import RetroArchMemoryReader
+            import time
+            max_retries = 10
+            for attempt in range(max_retries):
+                try:
+                    self._memory_reader = RetroArchMemoryReader()
+                    # Try to connect with the improved retry logic
+                    if self._memory_reader.connect(max_retries=5, retry_delay=2):
+                        return self._memory_reader
+                    else:
+                        print(f"[MemoryRead] Connection failed, retrying... (attempt {attempt+1}/{max_retries})")
+                        time.sleep(2)
+                except Exception as e:
+                    print(f"[MemoryRead] Error creating memory reader: {e}")
+                    time.sleep(2)
+            raise RuntimeError("Could not connect to RetroArch after several attempts.")
+        return self._memory_reader
+
+    def _get_sonic_position(self):
+        try:
+            reader = self._get_memory_reader()
+            x_bytes = reader.read_memory(0xFFD008, 2)
+            y_bytes = reader.read_memory(0xFFD00C, 2)
+            x = int.from_bytes(x_bytes, byteorder='big', signed=False)
+            y = int.from_bytes(y_bytes, byteorder='big', signed=False)
+            return (x, y)
+        except Exception as e:
+            print(f"[MemoryRead] Error reading Sonic position: {e}")
+            return (0, 0)
+
+    def _get_sonic_velocity(self):
+        try:
+            reader = self._get_memory_reader()
+            x_bytes = reader.read_memory(0xFFD010, 2)
+            y_bytes = reader.read_memory(0xFFD012, 2)
+            x = int.from_bytes(x_bytes, byteorder='big', signed=True)
+            y = int.from_bytes(y_bytes, byteorder='big', signed=True)
+            return (x, y)
+        except Exception as e:
+            print(f"[MemoryRead] Error reading Sonic velocity: {e}")
+            return (0, 0)
+
+    def _get_sonic_rings(self):
+        try:
+            reader = self._get_memory_reader()
+            ring_bytes = reader.read_memory(0xFFFE20, 2)
+            rings = int.from_bytes(ring_bytes, byteorder='big', signed=False)
+            return rings
+        except Exception as e:
+            print(f"[MemoryRead] Error reading rings: {e}")
+            return 0
+
+    def _get_sonic_score(self):
+        try:
+            reader = self._get_memory_reader()
+            score_bytes = reader.read_memory(0xFFFE26, 4)
+            bcd = int.from_bytes(score_bytes, byteorder='big', signed=False)
+            score = int(f"{bcd:X}")
+            return score
+        except Exception as e:
+            print(f"[MemoryRead] Error reading score: {e}")
+            return 0
+
+    def _get_sonic_lives(self):
+        try:
+            reader = self._get_memory_reader()
+            lives_bytes = reader.read_memory(0xFFFE12, 1)
+            lives = int.from_bytes(lives_bytes, byteorder='big', signed=False)
+            return lives
+        except Exception as e:
+            print(f"[MemoryRead] Error reading lives: {e}")
+            return 0
+
+    def _get_zone_act(self):
+        try:
+            reader = self._get_memory_reader()
+            zone_act_bytes = reader.read_memory(0xFFFE10, 2)
+            zone = zone_act_bytes[0]
+            act = zone_act_bytes[1]
+            return (zone, act)
+        except Exception as e:
+            print(f"[MemoryRead] Error reading zone/act: {e}")
+            return (0, 0)
+
+    def _get_game_mode(self):
+        try:
+            reader = self._get_memory_reader()
+            mode_bytes = reader.read_memory(0xFFF600, 1)
+            mode = int.from_bytes(mode_bytes, byteorder='big', signed=False)
+            return mode
+        except Exception as e:
+            print(f"[MemoryRead] Error reading game mode: {e}")
+            return 0
+
+    def _get_timer(self):
+        try:
+            reader = self._get_memory_reader()
+            min_byte = reader.read_memory(0xFFFE23, 1)
+            sec_byte = reader.read_memory(0xFFFE24, 1)
+            frame_byte = reader.read_memory(0xFFFE25, 1)
+            return (min_byte[0], sec_byte[0], frame_byte[0])
+        except Exception as e:
+            print(f"[MemoryRead] Error reading timer: {e}")
+            return (0, 0, 0)
+
+    def _get_invincibility(self):
+        try:
+            reader = self._get_memory_reader()
+            inv_bytes = reader.read_memory(0xFFFE2D, 1)
+            return bool(inv_bytes[0])
+        except Exception as e:
+            print(f"[MemoryRead] Error reading invincibility: {e}")
+            return False
+
+    def _get_shield(self):
+        try:
+            reader = self._get_memory_reader()
+            shield_bytes = reader.read_memory(0xFFFE2C, 1)
+            return bool(shield_bytes[0])
+        except Exception as e:
+            print(f"[MemoryRead] Error reading shield: {e}")
+            return False
+
+    def get_game_state(self) -> dict:
+        try:
+            state = {
+                'position': self._get_sonic_position(),
+                'velocity': self._get_sonic_velocity(),
+                'rings': self._get_sonic_rings(),
+                'score': self._get_sonic_score(),
+                'lives': self._get_sonic_lives(),
+                'zone_act': self._get_zone_act(),
+                'game_mode': self._get_game_mode(),
+                'timer': self._get_timer(),
+                'invincibility': self._get_invincibility(),
+                'shield': self._get_shield(),
+            }
+            import json
+            with open('game_state_log.jsonl', 'a') as f:
+                f.write(json.dumps(state) + '\n')
+            return state
+        except Exception as e:
+            print(f"Error getting game state: {e}")
+            return {}
     
     def reset(self):
         """Reset the emulator to the beginning of the game."""
-        # Press F1 to reset (common emulator reset key)
-        self.keyboard_controller.press(keyboard.Key.f1)
-        time.sleep(0.1)
-        self.keyboard_controller.release(keyboard.Key.f1)
+        # Try multiple reset methods to be more reliable
+        try:
+            # Method 1: Try F1 reset (but avoid if it's in quick menu hotkeys)
+            if 'F1' not in self.quick_menu_hotkeys:
+                self.keyboard_controller.press(keyboard.Key.f1)
+                time.sleep(0.1)
+                self.keyboard_controller.release(keyboard.Key.f1)
+                time.sleep(1)
+            else:
+                # Method 2: Use START button multiple times to get to game
+                for _ in range(5):
+                    self.keyboard_controller.press(keyboard.Key.enter)  # START
+                    time.sleep(0.2)
+                    self.keyboard_controller.release(keyboard.Key.enter)
+                    time.sleep(0.1)
+        except Exception as e:
+            print(f"Reset failed: {e}")
+            # Fallback: just wait
+            time.sleep(2)
         
         # Wait for reset to complete
         time.sleep(2)
@@ -404,4 +586,47 @@ class SonicEmulator:
     
     def __del__(self):
         """Cleanup when object is destroyed."""
-        self.close() 
+        self.close()
+    
+    def _focus_emulator_window(self):
+        """Bring the emulator window to the foreground."""
+        try:
+            import win32gui
+            import win32con
+            
+            def enum_windows_callback(hwnd, windows):
+                if win32gui.IsWindowVisible(hwnd):
+                    window_text = win32gui.GetWindowText(hwnd)
+                    if any(name in window_text.lower() for name in ['bizhawk', 'retroarch', 'sonic']):
+                        windows.append(hwnd)
+                return True
+            
+            windows = []
+            win32gui.EnumWindows(enum_windows_callback, windows)
+            
+            if windows:
+                # Bring the first found emulator window to the foreground
+                hwnd = windows[0]
+                win32gui.SetForegroundWindow(hwnd)
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.1)  # Small delay to ensure window is focused
+                print(f"Focused emulator window: {win32gui.GetWindowText(hwnd)}")
+            else:
+                print("No emulator window found to focus")
+                
+        except Exception as e:
+            print(f"Could not focus emulator window: {e}")
+    
+    def _detect_act_clear_screen(self) -> bool:
+        """Detect if we're in the ACT CLEAR screen."""
+        try:
+            # This would require screen capture and image analysis
+            # For now, return False as a placeholder
+            # In a real implementation, you would:
+            # 1. Capture the screen
+            # 2. Look for "ACT CLEAR" text or specific visual patterns
+            # 3. Check for the characteristic end-of-act music/sounds
+            return False
+        except Exception as e:
+            print(f"Error detecting act clear screen: {e}")
+            return False 

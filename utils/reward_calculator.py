@@ -77,8 +77,9 @@ class RewardCalculator:
     def _calculate_ring_reward(self, prev_state: Dict[str, Any], 
                               curr_state: Dict[str, Any]) -> float:
         """Calculate reward for collecting rings."""
-        prev_rings = prev_state.get('rings', 0)
-        curr_rings = curr_state.get('rings', 0)
+        # Handle multiple possible key names for rings
+        prev_rings = prev_state.get('rings', prev_state.get('rings_count', 0))
+        curr_rings = curr_state.get('rings', curr_state.get('rings_count', 0))
         
         rings_collected = curr_rings - prev_rings
         return rings_collected * self.ring_reward
@@ -98,18 +99,52 @@ class RewardCalculator:
     def _calculate_power_up_reward(self, prev_state: Dict[str, Any], 
                                   curr_state: Dict[str, Any]) -> float:
         """Calculate reward for collecting power-ups."""
-        # This would require tracking power-up states
-        # For now, return 0 (can be enhanced with memory reading)
-        return 0.0
+        # Check for shield, speed shoes, invincibility changes
+        prev_shield = prev_state.get('shield', False)
+        curr_shield = curr_state.get('shield', False)
+        prev_invincibility = prev_state.get('invincibility', False)
+        curr_invincibility = curr_state.get('invincibility', False)
+        
+        reward = 0.0
+        if curr_shield and not prev_shield:
+            reward += self.power_up_reward
+        if curr_invincibility and not prev_invincibility:
+            reward += self.power_up_reward * 0.5
+        
+        return reward
     
     def _calculate_level_reward(self, prev_state: Dict[str, Any], 
                                curr_state: Dict[str, Any]) -> float:
         """Calculate reward for completing a level."""
-        prev_level = prev_state.get('level', 0)
-        curr_level = curr_state.get('level', 0)
+        # Check for zone/act changes or level completion
+        prev_zone = prev_state.get('zone', 0)
+        curr_zone = curr_state.get('zone', 0)
+        prev_act = prev_state.get('act', 0)
+        curr_act = curr_state.get('act', 0)
         
-        if curr_level > prev_level:
+        # Special reward for completing Green Hill Zone Act 3 (our main objective)
+        if prev_zone == 1 and prev_act == 3 and curr_zone > 1:
+            # Completed Green Hill Zone and moved to Zone 2
+            return self.level_complete_reward * 2  # Double reward for main objective
+        elif prev_zone == 1 and prev_act == 3 and curr_act > 3:
+            # Completed Act 3 and moved to Act 4
+            return self.level_complete_reward * 2  # Double reward for main objective
+        elif prev_zone == 1 and prev_act == 3 and curr_state.get('game_mode', 0) in [0x18, 0x1C, 0x20, 0x24, 0x28, 0x2C]:
+            # Act 3 completion screen
+            return self.level_complete_reward * 2  # Double reward for main objective
+        
+        # Regular level completion rewards
+        if curr_zone > prev_zone or curr_act > prev_act:
             return self.level_complete_reward
+        
+        # Also check for game mode changes indicating completion
+        prev_game_mode = prev_state.get('game_mode', 0)
+        curr_game_mode = curr_state.get('game_mode', 0)
+        
+        # Game modes 0x18 and 0x1C often indicate level completion
+        if curr_game_mode in [0x18, 0x1C] and prev_game_mode not in [0x18, 0x1C]:
+            return self.level_complete_reward
+        
         return 0.0
     
     def _calculate_game_over_penalty(self, prev_state: Dict[str, Any], 
@@ -125,13 +160,17 @@ class RewardCalculator:
     def _calculate_progress_reward(self, prev_state: Dict[str, Any], 
                                   curr_state: Dict[str, Any]) -> float:
         """Calculate reward for forward progress."""
-        prev_pos = prev_state.get('position', (0, 0))
-        curr_pos = curr_state.get('position', (0, 0))
+        # Handle position data from emulator
+        prev_pos = prev_state.get('position', prev_state.get('position_x', 0))
+        curr_pos = curr_state.get('position', curr_state.get('position_x', 0))
         
+        # Handle both tuple and single value formats
         if isinstance(prev_pos, (list, tuple)) and isinstance(curr_pos, (list, tuple)):
             progress = curr_pos[0] - prev_pos[0]  # X-coordinate progress
-            return max(0, progress) * self.progress_reward
-        return 0.0
+        else:
+            progress = curr_pos - prev_pos  # Single X value
+        
+        return max(0, progress) * self.progress_reward
     
     def _calculate_speed_reward(self, prev_state: Dict[str, Any], 
                                curr_state: Dict[str, Any]) -> float:
@@ -146,6 +185,7 @@ class RewardCalculator:
     def _calculate_height_reward(self, prev_state: Dict[str, Any], 
                                 curr_state: Dict[str, Any]) -> float:
         """Calculate reward for height (jumping)."""
+        # Handle position data from emulator
         prev_pos = prev_state.get('position', (0, 0))
         curr_pos = curr_state.get('position', (0, 0))
         

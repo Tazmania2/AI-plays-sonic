@@ -14,6 +14,8 @@ import time
 import logging
 import csv
 import json
+import signal
+import atexit
 from pathlib import Path
 from typing import Dict, Any, Optional
 import multiprocessing
@@ -35,22 +37,91 @@ from utils.observation_processor import SonicSpecificProcessor
 from utils.reward_calculator import SonicSpecificRewardCalculator
 from visualization.training_visualizer import TrainingVisualizer
 from environment.hierarchical_shaping_wrapper import HierarchicalShapingWrapper
+from utils.input_isolator import get_input_manager, shutdown_input_manager
 
+# Global variables for cleanup
+current_agent = None
+current_env = None
+current_processes = []
+shutdown_requested = False
+
+def signal_handler(signum, frame):
+    """Handle termination signals gracefully."""
+    global shutdown_requested
+    print(f"\n🛑 Received signal {signum}. Initiating graceful shutdown...")
+    shutdown_requested = True
+    cleanup_resources()
+
+def cleanup_resources():
+    """Clean up all resources gracefully."""
+    global current_agent, current_env, current_processes
+    
+    print("🧹 Cleaning up resources...")
+    
+    # Close environment
+    if current_env is not None:
+        try:
+            current_env.close()
+            print("✅ Environment closed")
+        except Exception as e:
+            print(f"⚠️  Error closing environment: {e}")
+    
+    # Shutdown input manager
+    try:
+        shutdown_input_manager()
+        print("✅ Input manager shutdown")
+    except Exception as e:
+        print(f"⚠️  Error shutting down input manager: {e}")
+    
+    # Terminate child processes
+    for proc in current_processes:
+        if proc.is_alive():
+            try:
+                proc.terminate()
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                print(f"✅ Process {proc.name} terminated")
+            except Exception as e:
+                print(f"⚠️  Error terminating process {proc.name}: {e}")
+    
+    # Clear lists
+    current_processes.clear()
+    current_agent = None
+    current_env = None
+    
+    print("✅ Cleanup complete")
+
+def register_cleanup():
+    """Register cleanup function to run on exit."""
+    atexit.register(cleanup_resources)
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+register_cleanup()
 
 def setup_logging(log_dir: str, level: str = "INFO") -> logging.Logger:
     """Set up logging configuration."""
     os.makedirs(log_dir, exist_ok=True)
     
-    logging.basicConfig(
-        level=getattr(logging, level.upper()),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(os.path.join(log_dir, 'training.log')),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
+    logger = logging.getLogger("SonicAI")
+    logger.setLevel(getattr(logging, level.upper()))
     
-    return logging.getLogger(__name__)
+    # Create handlers
+    file_handler = logging.FileHandler(os.path.join(log_dir, "training.log"))
+    console_handler = logging.StreamHandler()
+    
+    # Create formatters and add it to handlers
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # Add handlers to the logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -60,14 +131,14 @@ def load_config(config_path: str) -> Dict[str, Any]:
     return config
 
 
-def create_environment(config: Dict[str, Any], render: bool = False) -> SonicEnvironment:
+def create_environment(config: Dict[str, Any], render: bool = False, env_id: int = 0) -> SonicEnvironment:
     """Create and configure the Sonic environment."""
     # Update config for rendering if needed
     if render:
         config['game']['render'] = True
     
-    # Create environment
-    env = SonicEnvironment(config)
+    # Create environment with specific env_id for input isolation
+    env = SonicEnvironment(config, env_id=env_id)
     
     # Wrap with monitor for logging
     env = Monitor(env)
@@ -318,35 +389,88 @@ def save_final_model(agent, config: Dict[str, Any], logger: logging.Logger):
 
 
 class EnvThunk:
-    def __init__(self, config, render, shaping_phase_steps, mode):
+    """Picklable environment thunk for multiprocessing."""
+    def __init__(self, config, render, shaping_phase_steps, mode, env_id):
+        # Store only the necessary data for pickling
         self.config = config
         self.render = render
         self.shaping_phase_steps = shaping_phase_steps
         self.mode = mode
+        self.env_id = env_id
+    
     def __call__(self):
-        env = create_environment(self.config, render=self.render)
-        return HierarchicalShapingWrapper(env, reward_mode=self.mode, shaping_phase_steps=self.shaping_phase_steps)
+        """Create and return the environment."""
+        try:
+            # Create base environment
+            env = create_environment(self.config, render=self.render, env_id=self.env_id)
+            
+            # Wrap with hierarchical shaping
+            wrapped_env = HierarchicalShapingWrapper(
+                env, 
+                reward_mode=self.mode, 
+                shaping_phase_steps=self.shaping_phase_steps
+            )
+            
+            return wrapped_env
+        except Exception as e:
+            print(f"Error creating environment {self.env_id} for {self.mode}: {e}")
+            raise
 
 
-def ab_train_process(config, env_fns, agent_type, log_dir, mode, render, shaping_phase_steps, logger, cpu_cores=None, gpu_mem_fraction=None):
+def ab_train_process(config, env_fns, agent_type, log_dir, mode, render, shaping_phase_steps, cpu_cores=None, gpu_mem_fraction=None):
+    """A/B training process that runs in a separate process."""
+    # Create a new logger for this process
+    logger = setup_logging(log_dir, "INFO")
+    logger.info(f"Starting {mode} training process...")
+    
     # Set CPU affinity
     if cpu_cores is not None:
         p = psutil.Process()
         try:
             p.cpu_affinity(cpu_cores)
+            logger.info(f"Set CPU affinity to cores: {cpu_cores}")
         except Exception as e:
             logger.warning(f"Could not set CPU affinity: {e}")
+    
     # Set per-process GPU memory fraction (PyTorch)
     if torch.cuda.is_available() and gpu_mem_fraction is not None:
         try:
             torch.cuda.set_per_process_memory_fraction(gpu_mem_fraction)
+            logger.info(f"Set GPU memory fraction to: {gpu_mem_fraction}")
         except Exception as e:
             logger.warning(f"Could not set GPU memory fraction: {e}")
-    env = DummyVecEnv(env_fns)
-    agent = create_agent(agent_type, env, config)
-    train_agent(agent, env, config, [], logger, log_dir=log_dir, mode=mode)
-    save_final_model(agent, config, logger)
-    env.close()
+    
+    try:
+        # Create input manager for this process (each process gets its own)
+        from utils.input_isolator import get_input_manager
+        input_manager = get_input_manager(num_instances=4)
+        logger.info(f"Created input manager for {mode} process")
+        
+        # Create environments - each process manages its own environments
+        logger.info(f"Creating {len(env_fns)} environments for {mode} training...")
+        
+        # Create vectorized environment directly from environment functions
+        env = DummyVecEnv(env_fns)
+        
+        # Create agent
+        logger.info(f"Creating {agent_type} agent for {mode} training...")
+        agent = create_agent(agent_type, env, config)
+        
+        # Train agent
+        logger.info(f"Starting training for {mode} mode...")
+        train_agent(agent, env, config, [], logger, log_dir=log_dir, mode=mode)
+        
+        # Save final model
+        save_final_model(agent, config, logger)
+        
+        # Cleanup
+        env.close()
+        input_manager.shutdown()
+        logger.info(f"{mode} training process completed successfully!")
+        
+    except Exception as e:
+        logger.error(f"{mode} training process failed: {e}")
+        raise
 
 
 def log_metrics_to_csv(metrics, filename):
@@ -382,6 +506,8 @@ def log_training_session_summary(session_data, filename):
 
 def main():
     """Main training function."""
+    global current_agent, current_env, current_processes, shutdown_requested
+    
     parser = argparse.ArgumentParser(description="Train Sonic AI agent")
     parser.add_argument("--config", type=str, default="configs/training_config.yaml",
                        help="Path to configuration file")
@@ -397,7 +523,7 @@ def main():
     # New CLI flags
     parser.add_argument("--reward_mode", type=str, choices=["baseline", "shaping", "both"], default="baseline",
                         help="Reward mode: baseline, shaping, or both (A/B test)")
-    parser.add_argument("--num_envs", type=int, default=8, help="Number of parallel environments")
+    parser.add_argument("--num_envs", type=int, default=4, help="Number of parallel environments")
     parser.add_argument("--shaping_phase_steps", type=int, default=500_000, help="Steps for shaping phase")
     args = parser.parse_args()
     
@@ -437,15 +563,28 @@ def main():
     logger.info(f"Using device: {device}")
     
     try:
+        # Initialize input manager for multiple environments (only for single process)
+        if args.num_envs > 1 and args.reward_mode != "both":
+            input_manager = get_input_manager(args.num_envs)
+            logger.info(f"Initialized input manager for {args.num_envs} environments")
+        
         # Create environments
         logger.info("Creating training environment(s)...")
         if args.reward_mode == "both":
             n_envs = args.num_envs
             n_envs_baseline = n_envs // 2
             n_envs_shaping = n_envs - n_envs_baseline
-            # Use EnvThunk for Windows compatibility
-            env_fns_baseline = [EnvThunk(config, args.render, args.shaping_phase_steps, 'baseline') for _ in range(n_envs_baseline)]
-            env_fns_shaping = [EnvThunk(config, args.render, args.shaping_phase_steps, 'shaping') for _ in range(n_envs_shaping)]
+            
+            # Create environment functions with proper env_ids
+            env_fns_baseline = []
+            env_fns_shaping = []
+            
+            for i in range(n_envs_baseline):
+                env_fns_baseline.append(EnvThunk(config, args.render, args.shaping_phase_steps, 'baseline', env_id=i))
+            
+            for i in range(n_envs_shaping):
+                env_fns_shaping.append(EnvThunk(config, args.render, args.shaping_phase_steps, 'shaping', env_id=i+n_envs_baseline))
+            
             # CPU affinity: baseline (0,1,2,6,7,8), shaping (3,4,5,9,10,11)
             baseline_cores = [0,1,2,6,7,8]
             shaping_cores = [3,4,5,9,10,11]
@@ -453,36 +592,83 @@ def main():
             logger.info("Launching parallel A/B training processes with CPU affinity and GPU memory split...")
             baseline_proc = multiprocessing.Process(
                 target=ab_train_process,
-                args=(config, env_fns_baseline, 'ppo', config['training']['log_dir'], "baseline", args.render, args.shaping_phase_steps, logger, baseline_cores, gpu_mem_fraction)
+                args=(config, env_fns_baseline, 'ppo', config['training']['log_dir'], "baseline", args.render, args.shaping_phase_steps, baseline_cores, gpu_mem_fraction)
             )
             shaping_proc = multiprocessing.Process(
                 target=ab_train_process,
-                args=(config, env_fns_shaping, 'ppo', config['training']['log_dir'], "shaping", args.render, args.shaping_phase_steps, logger, shaping_cores, gpu_mem_fraction)
+                args=(config, env_fns_shaping, 'ppo', config['training']['log_dir'], "shaping", args.render, args.shaping_phase_steps, shaping_cores, gpu_mem_fraction)
             )
+            
+            # Add processes to global list for cleanup
+            current_processes.extend([baseline_proc, shaping_proc])
+            
             baseline_proc.start()
             shaping_proc.start()
-            baseline_proc.join()
-            shaping_proc.join()
-            logger.info("A/B training completed!")
+            
+            # Monitor processes and check for shutdown
+            while baseline_proc.is_alive() or shaping_proc.is_alive():
+                if shutdown_requested:
+                    logger.info("Shutdown requested, terminating processes...")
+                    break
+                time.sleep(1)
+            
+            if not shutdown_requested:
+                baseline_proc.join()
+                shaping_proc.join()
+                logger.info("A/B training completed!")
             return
         else:
-            # Single reward mode
-            base_env = create_environment(config, render=args.render)
-            env = HierarchicalShapingWrapper(base_env, reward_mode=args.reward_mode, shaping_phase_steps=args.shaping_phase_steps)
+            # Single reward mode with multiple environments
+            if args.num_envs > 1:
+                # Create multiple environments with input isolation
+                env_fns = []
+                for i in range(args.num_envs):
+                    env_fns.append(EnvThunk(config, args.render, args.shaping_phase_steps, args.reward_mode, env_id=i))
+                
+                env = DummyVecEnv(env_fns)
+                current_env = env  # Store for cleanup
+                logger.info(f"Created {args.num_envs} environments with input isolation")
+            else:
+                # Single environment
+                base_env = create_environment(config, render=args.render, env_id=0)
+                env = HierarchicalShapingWrapper(base_env, reward_mode=args.reward_mode, shaping_phase_steps=args.shaping_phase_steps)
+                current_env = env  # Store for cleanup
+            
             # Create agent
             logger.info(f"Creating {config['agent']['type']} agent...")
             agent = create_agent(config['agent']['type'], env, config)
+            current_agent = agent  # Store for cleanup
+            
             # Create callbacks
             callbacks = create_callbacks(config, None)
+            
+            # Check for shutdown before training
+            if shutdown_requested:
+                logger.info("Shutdown requested before training started")
+                return
+            
             # Train agent
             agent = train_agent(agent, env, config, callbacks, logger, log_dir=config['training']['log_dir'], mode=args.reward_mode)
-            # Save final model
-            save_final_model(agent, config, logger)
-            env.close()
-            logger.info("Training completed successfully!")
+            
+            # Check for shutdown after training
+            if not shutdown_requested:
+                # Save final model
+                save_final_model(agent, config, logger)
+                logger.info("Training completed successfully!")
+            
     except Exception as e:
         logger.error(f"Training failed: {e}")
         raise
+    finally:
+        # Cleanup input manager (only if created in main process)
+        if args.num_envs > 1 and args.reward_mode != "both":
+            shutdown_input_manager()
+            logger.info("Input manager shutdown complete")
+        
+        # Clear global variables
+        current_agent = None
+        current_env = None
+        current_processes.clear()
 
 
 if __name__ == "__main__":

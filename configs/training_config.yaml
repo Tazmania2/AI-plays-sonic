@@ -1,12 +1,14 @@
 # Sonic AI Training Configuration - Optimized for RTX 2060 + i7-9750H + 40GB RAM
+# Objective: Complete Green Hill Zone Act 3 and achieve high scores
 
 # Game Settings
 game:
   name: "sonic1"  # sonic1, sonic2, sonic3
   rom_path: "roms/sonic1.md"  # Use the working ROM file
   frame_skip: 4  # Skip frames for faster training
-  max_steps: 15000  # Increased for longer episodes
+  max_steps: 12000  # Reduced since we're only doing Green Hill Zone
   render: false  # Render during training
+  objective: "Complete Green Hill Zone Act 3 and maximize score"
 
 # Environment Settings
 environment:
@@ -48,13 +50,15 @@ training:
   checkpoint_dir: "models/"
   log_dir: "logs/"
   
-# Reward Function - Comprehensive Behavioral Psychology Implementation
+# Reward Function - Optimized for Green Hill Zone Act 3 Completion
 rewards:
+  # Main Objective Reward (Green Hill Zone Act 3 completion)
+  level_completed: 3000.0  # Large reward for completing Green Hill Zone Act 3
+  
   # Positive Reinforcement (Adding good stimulus)
   ring_collected: 15.0  # Reward for collecting rings
   enemy_defeated: 8.0   # Reward for defeating enemies
   power_up_collected: 20.0  # Reward for power-ups
-  level_completed: 1500.0  # Large reward for completing level
   checkpoint_reached: 100.0  # Reward for reaching checkpoints
   
   # Positive Punishment (Adding bad stimulus)
@@ -130,10 +134,11 @@ evaluation:
   deterministic: true
   render: true
 
-# Emulator Settings
+# Emulator Settings - BizHawk Configuration
 emulator:
-  path: "C:\\RetroArch-Win64\\retroarch.exe"
-  core: "genesis_plus_gx_libretro.dll"  # Updated to use the correct core
+  bizhawk_dir: "C:\\Program Files (x86)\\BizHawk-2.10-win-x64"
+  lua_script_path: "emulator/bizhawk_bridge_file.lua"
   window_size: [800, 600]
   fullscreen: false
-  audio: false  # Disable audio for faster training 
+  audio: false  # Disable audio for faster training
+  port: 55555  # Default port for file-based communication 

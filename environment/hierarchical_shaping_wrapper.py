@@ -69,7 +69,14 @@ class HierarchicalShapingWrapper(gym.Wrapper):
         shaping_active = self.in_shaping_phase and (self.current_step < self.shaping_phase_steps)
 
         # --- Get full game state from emulator ---
-        game_state = self.env.emulator.get_game_state()
+        # Access emulator through the underlying environment (bypass Monitor wrapper)
+        if hasattr(self.env, 'env'):
+            # If wrapped by Monitor, access the underlying env
+            actual_env = self.env.env
+        else:
+            actual_env = self.env
+            
+        game_state = actual_env.emulator.get_game_state()
         x, y = game_state.get('position', (0, 0))
         vx, vy = game_state.get('velocity', (0, 0))
         rings = game_state.get('rings', 0)

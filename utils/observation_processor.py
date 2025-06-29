@@ -30,21 +30,35 @@ class ObservationProcessor:
         Process a raw screen image.
         
         Args:
-            image: Raw screen capture as numpy array (BGR format)
+            image: Raw screen capture as numpy array (BGR format from emulator)
             
         Returns:
             Processed observation ready for the RL agent
         """
-        # Convert BGR to RGB
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # Input validation
+        if image is None or image.size == 0:
+            print("Warning: Empty image received, returning zero array")
+            return np.zeros((*self.resize_dims, 1), dtype=np.float32)
+        
+        # Ensure image is in BGR format (from emulator)
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            # Already BGR from emulator, no conversion needed
+            pass
+        else:
+            print(f"Warning: Unexpected image format: {image.shape}")
+            return np.zeros((*self.resize_dims, 1), dtype=np.float32)
         
         # Crop if specified
         if self.crop_region:
             x, y, w, h = self.crop_region
-            image = image[y:y+h, x:x+w]
+            if (x + w <= image.shape[1] and y + h <= image.shape[0]):
+                image = image[y:y+h, x:x+w]
+            else:
+                print(f"Warning: Crop region {self.crop_region} exceeds image size {image.shape}")
         
-        # Convert to grayscale
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        # Convert BGR to grayscale directly (more efficient)
+        if len(image.shape) == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
         # Resize
         image = cv2.resize(image, self.resize_dims, interpolation=cv2.INTER_AREA)

@@ -3,7 +3,13 @@
 -- This version focuses on reliability and basic functionality
 
 -- Configuration
-local COMM_DIR = "D:/AI tests/bizhawk_comm"
+-- Build communication directory path
+local DEFAULT_BASE_DIR = os.getenv("BIZHAWK_COMM_BASE") or (os.getenv("PWD") or ".")
+
+-- Optional instance ID to support multiple parallel emulators
+local INSTANCE_ID = tonumber(os.getenv("BIZHAWK_INSTANCE_ID") or "0")
+
+local COMM_DIR = string.format("%s/bizhawk_comm_%d", DEFAULT_BASE_DIR, INSTANCE_ID)
 local REQUEST_FILE = COMM_DIR .. "/request.txt"
 local RESPONSE_FILE = COMM_DIR .. "/response.txt"
 local STATUS_FILE = COMM_DIR .. "/status.txt"
@@ -69,7 +75,10 @@ end
 local function set_input_state(input_name, state)
     if INPUT_MAP[input_name] then
         local success, err = pcall(function()
-            joypad.set(INPUT_MAP[input_name], state)
+            -- joypad.set requires a table: { ["P1 A"] = true }
+            local btn = {}
+            btn[INPUT_MAP[input_name]] = state
+            joypad.set(btn)
         end)
         
         if success then
@@ -213,6 +222,42 @@ while true do
     local request_content = read_file(REQUEST_FILE)
     
     if request_content and request_content ~= "" then
+        -- Trim whitespace
+        request_content = request_content:gsub("^%s+",""):gsub("%s+$","")
+
+        -- Handle raw memory read command: "read <hex_addr> <size>"
+        local addr_hex, size_str = request_content:match("^read%s+(%x+)%s+(%d+)$")
+        if addr_hex and size_str then
+            local addr = tonumber(addr_hex, 16)
+            local size = tonumber(size_str)
+
+            -- Read bytes from memory safely
+            local bytes = {}
+            for i = 0, size - 1 do
+                local b = memory.read_u8(addr + i, "System Bus") or 0
+                table.insert(bytes, string.char(b))
+            end
+
+            -- Concatenate into binary string
+            local data_str = table.concat(bytes)
+
+            -- Write binary response
+            local file = io.open(RESPONSE_FILE, "wb")
+            if file then
+                file:write(data_str)
+                file:close()
+                log(string.format("Responded to memory read 0x%X (%d bytes)", addr, size))
+            else
+                log("ERROR: Could not write memory response file")
+            end
+
+            -- Clear request file
+            delete_file(REQUEST_FILE)
+
+            -- Continue loop without advancing again (we will advance at loop end)
+            goto continue_main_loop
+        end
+
         log("Received request: " .. request_content)
         
         -- Process command
@@ -228,7 +273,8 @@ while true do
         -- Clear request file
         delete_file(REQUEST_FILE)
     end
-    
+
+    ::continue_main_loop::
     -- Small delay to prevent excessive CPU usage
     emu.frameadvance()
 end 

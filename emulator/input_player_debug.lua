@@ -67,7 +67,9 @@ end
 
 local function set_input_state(input_name, state)
     if INPUT_MAP[input_name] then
-        joypad.set(INPUT_MAP[input_name], state)
+        local btn = {}
+        btn[INPUT_MAP[input_name]] = state
+        joypad.set(btn)
         log(string.format("Set %s = %s", input_name, tostring(state)))
     else
         log(string.format("Unknown input: %s", input_name))

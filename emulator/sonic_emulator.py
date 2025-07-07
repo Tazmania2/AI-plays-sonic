@@ -147,6 +147,8 @@ class SonicEmulator:
         # Set environment variable for instance ID
         env = os.environ.copy()
         env['BIZHAWK_INSTANCE_ID'] = str(self.instance_id)
+        # Share base directory for communication files with Lua script
+        env['BIZHAWK_COMM_BASE'] = os.getcwd()
         
         cmd = [
             os.path.join(self.bizhawk_dir, "EmuHawk.exe"),

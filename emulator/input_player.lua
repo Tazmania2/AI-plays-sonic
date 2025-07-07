@@ -102,7 +102,11 @@ end
 
 local function set_input_state(input_name, state)
     if INPUT_MAP[input_name] then
-        joypad.set(INPUT_MAP[input_name], state)
+        -- BizHawk\'s joypad.set expects a table mapping button names to booleans
+        -- Build a one-key table so we can toggle a single input reliably.
+        local btn = {}
+        btn[INPUT_MAP[input_name]] = state
+        joypad.set(btn) -- default player 1
         log(string.format("Set %s = %s", input_name, tostring(state)))
     else
         log(string.format("Unknown input: %s", input_name))

@@ -314,16 +314,21 @@ class FileBasedInputManager:
     This replaces the Windows API-based input system.
     """
     
-    def __init__(self, comm_dir: str = "D:/AI tests/bizhawk_comm"):
+    def __init__(self, comm_dir: str = None, instance_id: int = 0):
+        # Use instance-specific communication directory
+        if comm_dir is None:
+            comm_dir = os.path.join(os.getcwd(), f"bizhawk_comm_{instance_id}")
+        
         self.comm_dir = Path(comm_dir)
         self.request_file = self.comm_dir / "request.txt"
         self.response_file = self.comm_dir / "response.txt"
         self.status_file = self.comm_dir / "status.txt"
         self.lock = threading.Lock()
+        self.instance_id = instance_id
         
         # Ensure communication directory exists
         self.comm_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[FileBasedInputManager] Using communication directory: {self.comm_dir}")
+        print(f"[FileBasedInputManager-{instance_id}] Using communication directory: {self.comm_dir}")
     
     def _send_command(self, command: str) -> Optional[str]:
         """Send a command to the Lua bridge and get response."""
@@ -339,7 +344,7 @@ class FileBasedInputManager:
                 
                 while not self.response_file.exists():
                     if time.time() - start_time > timeout:
-                        print(f"[FileBasedInputManager] Timeout waiting for response")
+                        print(f"[FileBasedInputManager-{self.instance_id}] Timeout waiting for response")
                         return None
                     time.sleep(0.01)
                 
@@ -356,7 +361,7 @@ class FileBasedInputManager:
                 return response
                 
         except Exception as e:
-            print(f"[FileBasedInputManager] Command send error: {e}")
+            print(f"[FileBasedInputManager-{self.instance_id}] Command send error: {e}")
             return None
     
     def send_action(self, action: str, duration: float = 0.016):
@@ -367,7 +372,7 @@ class FileBasedInputManager:
         
         response = self._send_command(command)
         if response:
-            print(f"[FileBasedInputManager] Sent action: {action}")
+            print(f"[FileBasedInputManager-{self.instance_id}] Sent action: {action}")
         
         # Hold for duration
         time.sleep(duration)
@@ -385,17 +390,19 @@ class FileBasedInputManager:
         """Check if the Lua bridge is ready."""
         return self.status_file.exists()
 
-# Global file-based input manager instance
-_file_based_input_manager = None
+# Global file-based input manager instances
+_file_based_input_managers = {}
 
-def get_input_manager(num_instances: int = 4) -> FileBasedInputManager:
-    """Get or create the global file-based input manager."""
-    global _file_based_input_manager
-    if _file_based_input_manager is None:
-        _file_based_input_manager = FileBasedInputManager()
-    return _file_based_input_manager
+def get_input_manager(num_instances: int = 4, instance_id: int = 0) -> FileBasedInputManager:
+    """Get or create a file-based input manager for the specified instance."""
+    global _file_based_input_managers
+    
+    if instance_id not in _file_based_input_managers:
+        _file_based_input_managers[instance_id] = FileBasedInputManager(instance_id=instance_id)
+    
+    return _file_based_input_managers[instance_id]
 
 def shutdown_input_manager():
-    """Shutdown the global input manager."""
-    global _file_based_input_manager
-    _file_based_input_manager = None 
+    """Shutdown all input managers."""
+    global _file_based_input_managers
+    _file_based_input_managers.clear() 

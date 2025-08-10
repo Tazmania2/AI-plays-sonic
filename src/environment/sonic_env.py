@@ -54,16 +54,30 @@ class SonicEnvironment(gym.Env):
         self.emulator = SonicEmulator(
             rom_path=self.game_config['rom_path'],
             bizhawk_dir=config.get('bizhawk_dir', r"C:\Program Files (x86)\BizHawk-2.10-win-x64"),
-            lua_script_path=config.get('lua_script_path', 'emulator/bizhawk_bridge_file.lua'),
+            lua_script_path=config.get('lua_script_path', 'emulator/bizhawk_bridge.lua'),  # Fixed: use correct script name
             instance_id=instance_id
         )
         
+        # Initialize input manager for this environment
+        self.input_manager = get_input_manager(num_instances=4, instance_id=instance_id)
+        if self.input_manager:
+            print(f"[SonicEnvironment-{self.env_id}] Input manager initialized for instance {instance_id}")
+        else:
+            print(f"[SonicEnvironment-{self.env_id}] Warning: Input manager not available")
+        
         # Set environment ID for input isolation
-        # self.emulator.set_env_id(self.env_id)  # DEPRECATED: Not needed with file-based system
+        self.emulator.set_env_id(self.env_id)
         
         # Initialize processors
         self.obs_processor = ObservationProcessor(self.obs_config)
-        self.reward_calculator = RewardCalculator(config['rewards'])
+        
+        # Use simplified reward calculator if specified
+        reward_calculator_type = config.get('reward_calculator', 'complex')
+        if reward_calculator_type == 'simplified':
+            from utils.simplified_reward_calculator import SimplifiedRewardCalculator
+            self.reward_calculator = SimplifiedRewardCalculator(config['rewards'])
+        else:
+            self.reward_calculator = RewardCalculator(config['rewards'])
         
         # Environment state
         self.current_step = 0
@@ -186,20 +200,34 @@ class SonicEnvironment(gym.Env):
         if state.get('lives', 0) <= 0:
             return True
         
-        # Check for Green Hill Zone Act 3 completion (our specific win condition)
-        if self._is_green_hill_zone_act3_completed(state):
-            self._handle_green_hill_completion(state)
-            return True
+        # Check objective type
+        objective = self.config['game'].get('objective', 'complex')
         
-        # Time limit
-        if self.current_step >= self.max_steps:
-            return True
-        
-        # Stuck detection (optional)
-        if self._is_stuck(state):
-            return True
-        
-        return False
+        if objective == 'Move right and survive':
+            # Simplified objective: just check time limit and stuck detection
+            if self.current_step >= self.max_steps:
+                return True
+            
+            # Stuck detection (optional)
+            if self._is_stuck(state):
+                return True
+            
+            return False
+        else:
+            # Complex objective: check for Green Hill Zone Act 3 completion
+            if self._is_green_hill_zone_act3_completed(state):
+                self._handle_green_hill_completion(state)
+                return True
+            
+            # Time limit
+            if self.current_step >= self.max_steps:
+                return True
+            
+            # Stuck detection (optional)
+            if self._is_stuck(state):
+                return True
+            
+            return False
     
     def _is_green_hill_zone_act3_completed(self, state: Dict[str, Any]) -> bool:
         """Check if Green Hill Zone Act 3 has been completed."""

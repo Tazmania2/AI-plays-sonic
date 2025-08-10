@@ -1,43 +1,26 @@
--- Input Player for AI Training
--- Reads inputs from file and executes them while logging game state
+-- BizHawk Input Player for AI Training
+-- File-based communication system for AI input control
 
 -- Configuration
-local INPUT_FILE = "ai_inputs.txt"
-local LOG_FILE = "game_log.txt"
-local FRAME_DELAY = 1  -- Frames to wait between inputs
-local LOG_INTERVAL = 10  -- Log every N frames
+local DEFAULT_BASE_DIR = os.getenv("BIZHAWK_COMM_BASE") or (os.getenv("PWD") or ".")
+local INSTANCE_ID = tonumber(os.getenv("BIZHAWK_INSTANCE_ID") or "0")
 
--- Game state tracking
-local last_state = {}
-local frame_count = 0
-local input_count = 0
+local COMM_DIR = string.format("%s/bizhawk_comm_%d", DEFAULT_BASE_DIR, INSTANCE_ID)
+local INPUT_FILE = COMM_DIR .. "/ai_inputs.txt"
+local LOG_FILE = COMM_DIR .. "/game_log.txt"
+local STATUS_FILE = COMM_DIR .. "/status.txt"
+local COMPLETION_FILE = COMM_DIR .. "/execution_complete.txt"
 
--- Memory addresses for Sonic (Genesis)
-local MEMORY_ADDRESSES = {
-    -- Player position
-    SONIC_X = 0xFFB000,
-    SONIC_Y = 0xFFB004,
-    
-    -- Player state
-    SONIC_STATE = 0xFFB023,
-    SONIC_INVINCIBLE = 0xFFB02E,
-    SONIC_RINGS = 0xFFB020,
-    SONIC_LIVES = 0xFFB02A,
-    
-    -- Level info
-    LEVEL_ID = 0xFFFE10,
-    ACT_ID = 0xFFFE11,
-    SCORE = 0xFFFE26,
-    
-    -- Game state
-    GAME_STATE = 0xFFF600,
-    TIME_MINUTES = 0xFFFE22,
-    TIME_SECONDS = 0xFFFE23,
-    TIME_FRAMES = 0xFFFE24,
-    
-    -- Camera position
-    CAMERA_X = 0xFFEE00,
-    CAMERA_Y = 0xFFEE04
+-- Genesis controller state
+local genesis_state = {
+    up = false,
+    down = false,
+    left = false,
+    right = false,
+    a = false,
+    b = false,
+    c = false,
+    start = false
 }
 
 -- Input mapping for Genesis controller
@@ -49,228 +32,255 @@ local INPUT_MAP = {
     ["A"] = "P1 A",
     ["B"] = "P1 B", 
     ["C"] = "P1 C",
-    ["START"] = "P1 Start"
+    ["START"] = "P1 Start",
+    ["NOOP"] = nil,
+    ["RESET"] = "RESET"
 }
+
+-- Game state tracking
+local current_frame = 0
+local last_log_frame = 0
+local log_interval = 5  -- Log every 5 frames
 
 -- Utility functions
 local function log(message)
-    print(string.format("[InputPlayer] %s", message))
+    print(string.format("[InputPlayer-%d] %s", INSTANCE_ID, message))
 end
 
-local function read_memory_byte(address)
-    return memory.read_u8(address, "System Bus")
+local function create_directory(path)
+    local success = os.execute("mkdir \"" .. path .. "\" 2>nul")
+    return success
 end
 
-local function read_memory_word(address)
-    return memory.read_u16_le(address, "System Bus")
+local function write_file(path, content)
+    local file = io.open(path, "w")
+    if file then
+        file:write(content)
+        file:close()
+        return true
+    end
+    return false
 end
 
-local function read_memory_dword(address)
-    return memory.read_u32_le(address, "System Bus")
+local function read_file(path)
+    local file = io.open(path, "r")
+    if file then
+        local content = file:read("*all")
+        file:close()
+        return content
+    end
+    return nil
+end
+
+local function delete_file(path)
+    os.remove(path)
+end
+
+local function set_input_state(input_name, state)
+    if input_name == "RESET" then
+        -- Handle reset command
+        log("Executing reset command")
+        emu.softreset()
+        return true
+    end
+    
+    if INPUT_MAP[input_name] then
+        local success, err = pcall(function()
+            local btn = {}
+            btn[INPUT_MAP[input_name]] = state
+            joypad.set(btn)
+        end)
+        
+        if success then
+            genesis_state[string.lower(input_name)] = state
+            log(string.format("Set %s = %s", input_name, tostring(state)))
+            return true
+        else
+            log(string.format("Failed to set input %s: %s", input_name, tostring(err)))
+            return false
+        end
+    else
+        log(string.format("Unknown input: %s", input_name))
+        return false
+    end
+end
+
+local function reset_all_inputs()
+    for input_name, _ in pairs(genesis_state) do
+        set_input_state(string.upper(input_name), false)
+    end
+    log("All inputs reset")
 end
 
 local function get_game_state()
     local state = {}
     
-    -- Read player position
-    state.sonic_x = read_memory_word(MEMORY_ADDRESSES.SONIC_X)
-    state.sonic_y = read_memory_word(MEMORY_ADDRESSES.SONIC_Y)
+    -- Try to read memory values with error handling
+    local success, value
     
-    -- Read player state
-    state.sonic_state = read_memory_byte(MEMORY_ADDRESSES.SONIC_STATE)
-    state.sonic_invincible = read_memory_byte(MEMORY_ADDRESSES.SONIC_INVINCIBLE)
-    state.sonic_rings = read_memory_byte(MEMORY_ADDRESSES.SONIC_RINGS)
-    state.sonic_lives = read_memory_byte(MEMORY_ADDRESSES.SONIC_LIVES)
+    -- Player position (Sonic 1 addresses)
+    success, value = pcall(function() return memory.readword(0xFFD030) end)
+    state.x = success and value or 0
     
-    -- Read level info
-    state.level_id = read_memory_byte(MEMORY_ADDRESSES.LEVEL_ID)
-    state.act_id = read_memory_byte(MEMORY_ADDRESSES.ACT_ID)
-    state.score = read_memory_dword(MEMORY_ADDRESSES.SCORE)
+    success, value = pcall(function() return memory.readword(0xFFD038) end)
+    state.y = success and value or 0
     
-    -- Read game state
-    state.game_state = read_memory_byte(MEMORY_ADDRESSES.GAME_STATE)
-    state.time_minutes = read_memory_byte(MEMORY_ADDRESSES.TIME_MINUTES)
-    state.time_seconds = read_memory_byte(MEMORY_ADDRESSES.TIME_SECONDS)
-    state.time_frames = read_memory_byte(MEMORY_ADDRESSES.TIME_FRAMES)
+    -- Player state
+    success, value = pcall(function() return memory.readword(0xFFE002) end)
+    state.rings = success and value or 0
     
-    -- Read camera position
-    state.camera_x = read_memory_word(MEMORY_ADDRESSES.CAMERA_X)
-    state.camera_y = read_memory_word(MEMORY_ADDRESSES.CAMERA_Y)
+    success, value = pcall(function() return memory.readword(0xFFE004) end)
+    state.lives = success and value or 0
+    
+    success, value = pcall(function() return memory.readdword(0xFFE000) end)
+    state.score = success and value or 0
+    
+    -- Level info
+    success, value = pcall(function() return memory.readword(0xFFE012) end)
+    state.zone = success and value or 0
+    
+    success, value = pcall(function() return memory.readword(0xFFE014) end)
+    state.act = success and value or 0
+    
+    success, value = pcall(function() return memory.readword(0xFFE010) end)
+    state.timer = success and value or 0
+    
+    -- Player status
+    success, value = pcall(function() return memory.readword(0xFFE00E) end)
+    state.invincibility = success and value or 0
+    
+    success, value = pcall(function() return memory.readword(0xFFD044) end)
+    state.status = success and value or 0
+    
+    -- Current frame
+    state.frame = current_frame
     
     return state
 end
 
-local function set_input_state(input_name, state)
-    if INPUT_MAP[input_name] then
-        -- BizHawk\'s joypad.set expects a table mapping button names to booleans
-        -- Build a one-key table so we can toggle a single input reliably.
-        local btn = {}
-        btn[INPUT_MAP[input_name]] = state
-        joypad.set(btn) -- default player 1
-        log(string.format("Set %s = %s", input_name, tostring(state)))
-    else
-        log(string.format("Unknown input: %s", input_name))
+local function log_game_state()
+    if current_frame - last_log_frame >= log_interval then
+        local state = get_game_state()
+        local state_json = string.format(
+            '{"frame":%d,"x":%d,"y":%d,"rings":%d,"lives":%d,"score":%d,"zone":%d,"act":%d,"timer":%d,"invincibility":%d,"status":%d}',
+            state.frame, state.x, state.y, state.rings, state.lives, state.score,
+            state.zone, state.act, state.timer, state.invincibility, state.status
+        )
+        
+        -- Append to log file
+        local file = io.open(LOG_FILE, "a")
+        if file then
+            file:write(state_json .. "\n")
+            file:close()
+        end
+        
+        last_log_frame = current_frame
     end
 end
 
-local function reset_all_inputs()
-    for input_name, _ in pairs(INPUT_MAP) do
-        set_input_state(input_name, false)
-    end
-    log("All inputs reset")
-end
-
-local function log_game_state(frame, input_info)
-    local state = get_game_state()
-    
-    -- Create log entry
-    local log_entry = string.format(
-        "FRAME:%d|INPUT:%s|X:%d|Y:%d|RINGS:%d|LIVES:%d|LEVEL:%d|ACT:%d|SCORE:%d|TIME:%02d:%02d:%02d",
-        frame,
-        input_info or "NONE",
-        state.sonic_x,
-        state.sonic_y,
-        state.sonic_rings,
-        state.sonic_lives,
-        state.level_id,
-        state.act_id,
-        state.score,
-        state.time_minutes,
-        state.time_seconds,
-        state.time_frames
-    )
-    
-    -- Write to log file
-    local file = io.open(LOG_FILE, "a")
-    if file then
-        file:write(log_entry .. "\n")
-        file:close()
-    end
-    
-    -- Also print to console for debugging
-    log(log_entry)
-end
-
-local function read_input_file()
-    local file = io.open(INPUT_FILE, "r")
-    if not file then
-        return nil
+local function read_input_sequence()
+    local content = read_file(INPUT_FILE)
+    if not content or content == "" then
+        return {}
     end
     
     local inputs = {}
-    for line in file:lines() do
-        line = line:gsub("%s+", "")  -- Remove whitespace
-        if line ~= "" then
-            table.insert(inputs, line)
+    for line in content:gmatch("[^\r\n]+") do
+        local frame_str, action = line:match("^(%d+):(.+)$")
+        if frame_str and action then
+            local frame = tonumber(frame_str)
+            table.insert(inputs, {frame = frame, action = action})
         end
     end
-    file:close()
     
     return inputs
 end
 
-local function clear_log_file()
-    local file = io.open(LOG_FILE, "w")
-    if file then
-        file:write("")  -- Clear file
-        file:close()
+local function execute_input_sequence(inputs)
+    if #inputs == 0 then
+        return
     end
+    
+    log(string.format("Executing %d inputs", #inputs))
+    
+    -- Reset all inputs first
+    reset_all_inputs()
+    
+    local current_input_index = 1
+    local max_frames = 300  -- Maximum frames to execute
+    
+    for frame = 0, max_frames do
+        current_frame = frame
+        
+        -- Check if we have inputs for this frame
+        while current_input_index <= #inputs and inputs[current_input_index].frame <= frame do
+            local input = inputs[current_input_index]
+            set_input_state(input.action, true)
+            current_input_index = current_input_index + 1
+        end
+        
+        -- Log game state periodically
+        log_game_state()
+        
+        -- Advance frame
+        emu.frameadvance()
+        
+        -- Check if we've processed all inputs
+        if current_input_index > #inputs then
+            break
+        end
+    end
+    
+    -- Reset all inputs at the end
+    reset_all_inputs()
+    
+    -- Mark execution as complete
+    write_file(COMPLETION_FILE, "COMPLETE")
+    
+    log("Input sequence execution completed")
 end
 
--- Main execution
+-- Initialize
 log("Input Player starting...")
+log("Using communication directory: " .. COMM_DIR)
+
+-- Create communication directory
+if create_directory(COMM_DIR) then
+    log("Communication directory created successfully")
+else
+    log("Could not create communication directory")
+end
+
+-- Create status file
+if write_file(STATUS_FILE, "READY") then
+    log("Status file created: READY")
+else
+    log("ERROR: Could not create status file")
+end
+
 log("Input file: " .. INPUT_FILE)
 log("Log file: " .. LOG_FILE)
-log("Current working directory: " .. (os.getenv("PWD") or "unknown"))
+log("Status file: " .. STATUS_FILE)
+log("Completion file: " .. COMPLETION_FILE)
 
--- Clear previous log
-clear_log_file()
-
--- Write header to log
-local header_file = io.open(LOG_FILE, "w")
-if header_file then
-    header_file:write("FRAME|INPUT|X|Y|RINGS|LIVES|LEVEL|ACT|SCORE|TIME\n")
-    header_file:close()
-end
+log("Input Player ready. Waiting for input files...")
 
 -- Main loop
 while true do
-    frame_count = frame_count + 1
-    
     -- Check for input file
-    local inputs = read_input_file()
+    local inputs = read_input_sequence()
     
-    if inputs and #inputs > 0 then
-        log("Found " .. #inputs .. " inputs to execute")
+    if #inputs > 0 then
+        log(string.format("Found %d inputs to execute", #inputs))
         
-        -- Execute each input
-        for i, input_line in ipairs(inputs) do
-            input_count = input_count + 1
-            
-            -- Parse input (format: "FRAME:ACTION" or just "ACTION")
-            local frame, action = input_line:match("(%d+):(.+)")
-            if not frame then
-                action = input_line
-                frame = frame_count
-            else
-                frame = tonumber(frame)
-            end
-            
-            -- Wait until we reach the target frame
-            while frame_count < frame do
-                emu.frameadvance()
-                frame_count = frame_count + 1
-                
-                -- Log periodically
-                if frame_count % LOG_INTERVAL == 0 then
-                    log_game_state(frame_count, "WAIT")
-                end
-            end
-            
-            -- Execute the action
-            if action == "RESET" then
-                reset_all_inputs()
-                log_game_state(frame_count, "RESET")
-            elseif action == "NONE" or action == "NOOP" then
-                log_game_state(frame_count, "NONE")
-            else
-                -- Parse multiple inputs (e.g., "LEFT+A")
-                for input_name in action:gmatch("[^+]+") do
-                    set_input_state(input_name, true)
-                end
-                
-                log_game_state(frame_count, action)
-                
-                -- Hold inputs for a few frames
-                for hold_frame = 1, FRAME_DELAY do
-                    emu.frameadvance()
-                    frame_count = frame_count + 1
-                end
-                
-                -- Reset all inputs
-                reset_all_inputs()
-            end
-        end
+        -- Clear input file
+        delete_file(INPUT_FILE)
         
-        -- Delete input file after execution
-        os.remove(INPUT_FILE)
-        log("Input execution complete, file deleted")
-        
-        -- Write completion marker
-        local completion_file = io.open("execution_complete.txt", "w")
-        if completion_file then
-            completion_file:write(string.format("COMPLETE|FRAMES:%d|INPUTS:%d", frame_count, input_count))
-            completion_file:close()
-        end
-        
-        log("Execution complete. Waiting for new input file...")
-        
+        -- Execute input sequence
+        execute_input_sequence(inputs)
     else
-        -- No input file, just advance frame and log periodically
-        if frame_count % LOG_INTERVAL == 0 then
-            log_game_state(frame_count, "IDLE")
-        end
+        -- No inputs, just log game state and advance
+        log_game_state()
+        emu.frameadvance()
     end
-    
-    emu.frameadvance()
 end 

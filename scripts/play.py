@@ -271,9 +271,9 @@ def main():
     parser.add_argument("--agent-type", type=str, choices=["ppo", "a2c", "dqn"],
                        help="Agent type (auto-detected from model if not specified)")
     parser.add_argument("--file-based", action="store_true",
-                       help="Use file-based environment (secondary input method)")
-    parser.add_argument("--standard", action="store_true",
-                       help="Use standard environment with direct memory access")
+                       help="Use file-based environment instead of direct memory access")
+    parser.add_argument("--direct-input", action="store_true",
+                       help="Use direct input environment (Windows API-based input injection)")
     parser.add_argument("--instance-id", type=int, default=0,
                        help="Instance ID for environment (default: 0)")
     
@@ -307,27 +307,26 @@ def main():
     print(f"Loading {agent_type.upper()} model from: {args.model}")
     print(f"Playing {args.episodes} episode(s)")
     print(f"Rendering: {args.render}")
-    if args.standard:
-        env_type = "Standard"
+    if args.direct_input:
+        env_type = "Direct Input"
     elif args.file_based:
         env_type = "File-based"
     else:
-        env_type = "Direct Input (default)"
+        env_type = "Standard"
     print(f"Environment type: {env_type}")
     
     try:
         # Create environment
         print("Creating environment...")
-        if args.standard:
-            env = SonicEnvironment(config)
-            print("Using standard environment with direct memory access")
+        if args.direct_input:
+            env = DirectInputSonicEnvironment(config, env_id=args.instance_id)
+            print(f"Using direct input environment with instance ID: {args.instance_id}")
         elif args.file_based:
             env = FileBasedSonicEnvironment(config, instance_id=args.instance_id)
             print(f"Using file-based environment with instance ID: {args.instance_id}")
         else:
-            # Default: Use direct input environment
-            env = DirectInputSonicEnvironment(config, env_id=args.instance_id)
-            print(f"Using direct input environment (default) with instance ID: {args.instance_id}")
+            env = SonicEnvironment(config)
+            print("Using standard environment with direct memory access")
         
         # Load model
         print("Loading model...")

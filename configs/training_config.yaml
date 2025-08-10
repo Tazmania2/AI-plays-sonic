@@ -137,7 +137,7 @@ evaluation:
 # Emulator Settings - BizHawk Configuration
 emulator:
   bizhawk_dir: "C:\\Program Files (x86)\\BizHawk-2.10-win-x64"
-  lua_script_path: "emulator/bizhawk_bridge_file.lua"
+  lua_script_path: "emulator/bizhawk_bridge_fixed.lua"
   window_size: [800, 600]
   fullscreen: false
   audio: false  # Disable audio for faster training

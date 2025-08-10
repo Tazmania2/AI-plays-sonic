@@ -1,0 +1,99 @@
+# Simplified Sonic AI Training Configuration - Mario AI Inspired
+# Focus: Simple, effective learning with clear objectives
+
+# Game Settings
+game:
+  name: "sonic1"
+  rom_path: "roms/sonic1.md"
+  frame_skip: 4
+  max_steps: 8000  # Shorter episodes for faster learning
+  render: false
+  objective: "Move right and survive"  # Simple, clear objective
+
+# Environment Settings
+environment:
+  screen_width: 224
+  screen_height: 256
+  grayscale: true
+  stack_frames: 2  # Reduced for simpler temporal learning
+  normalize_obs: true
+  reward_scale: 1.0
+
+# Agent Settings - Simplified for faster learning
+agent:
+  type: "ppo"
+  learning_rate: 0.0003  # Standard learning rate
+  batch_size: 64  # Smaller batches for more frequent updates
+  buffer_size: 10000  # Smaller buffer for faster learning
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  n_steps: 1024  # Shorter steps for more frequent updates
+
+# Network Architecture - Simpler for faster learning
+network:
+  type: "mlp"  # MLP is often sufficient for simple objectives
+  mlp_layers: [256, 128]  # Smaller network
+  activation: "relu"
+
+# Training Settings
+training:
+  total_timesteps: 1000000  # Reduced for faster experimentation
+  save_interval: 25000
+  eval_interval: 10000
+  log_interval: 100
+  checkpoint_dir: "models/"
+  log_dir: "logs/"
+  
+# Simplified Reward Function - Mario AI Style
+rewards:
+  # Primary Objective: Move Right (Distance-based reward)
+  distance_reward: 1.0  # +1 for each pixel moved right
+  
+  # Survival Rewards
+  survival_reward: 0.1  # Small reward for staying alive
+  
+  # Simple Collection Rewards
+  ring_collected: 5.0  # Reduced from 15.0
+  
+  # Simple Penalties
+  death_penalty: -100.0  # Clear penalty for dying
+  stuck_penalty: -1.0  # Small penalty for not moving
+  
+  # Remove complex behavioral psychology rewards
+  # No speed bonuses, height bonuses, exploration bonuses, etc.
+
+# Simplified Observation Processing
+observation:
+  resize: [64, 64]  # Smaller observation for faster processing
+  crop: [0, 0, 224, 256]
+  normalize: true
+  frame_stack: 2
+
+# Simplified Action Space - Mario AI Style
+actions:
+  basic:
+    - "NOOP"
+    - "RIGHT"  # Primary action
+    - "A"      # Jump
+    - "RIGHT+A"  # Jump while moving right
+    - "B"      # Spin dash
+    - "RIGHT+B"  # Spin dash while moving right
+  
+  # Remove complex combinations - focus on essential actions
+
+# Hardware Settings
+hardware:
+  device: "auto"
+  num_envs: 2  # Reduced for simpler setup
+  num_threads: 4
+
+# Evaluation Settings
+evaluation:
+  eval_freq: 10000
+  n_eval_episodes: 5
+  deterministic: true
+  render: true

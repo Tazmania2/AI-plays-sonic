@@ -8,8 +8,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import threading
 import queue
-from utils.bizhawk_memory_file import BizHawkMemoryReaderFile
-from utils.input_isolator import get_input_manager
+from src.utils.bizhawk_memory_file import BizHawkMemoryReaderFile
+from src.utils.input_isolator import get_input_manager
 
 # For screen capture (cross-platform)
 try:
@@ -115,6 +115,9 @@ class SonicEmulator:
         # Update capture region after launch
         self._update_capture_region()
         
+        # Initialize input manager
+        self._init_input_manager()
+    
     def set_env_id(self, env_id: int):
         """Set the environment ID for input isolation."""
         # self.env_id = env_id  # DEPRECATED: Not needed with file-based system
@@ -195,52 +198,65 @@ class SonicEmulator:
             return np.zeros((self.screen_height, self.screen_width, 3), dtype=np.uint8)
     
     def step(self, actions: List[str]):
-        """Execute actions in the emulator using Lua bridge."""
+        """Execute actions in the emulator using input manager."""
         if not actions:
             return
         
         try:
-            # Convert actions to Lua bridge format
-            # The Lua bridge expects inputs like "LEFT:true|A:false|RIGHT:true"
-            input_commands = []
-            
-            # Reset all inputs first
-            self.memory_reader._send_command("ACTION:RESET_INPUTS")
-            
-            # Set the requested inputs to true
-            for action in actions:
-                if action in ['LEFT', 'RIGHT', 'UP', 'DOWN', 'A', 'B', 'C', 'START']:
-                    input_commands.append(f"{action}:true")
-            
-            if input_commands:
-                # Send inputs to Lua bridge
-                inputs_str = "|".join(input_commands)
-                self.memory_reader._send_command(f"ACTION:SET_INPUTS|INPUTS:{inputs_str}")
+            # Use input manager if available
+            if self.input_manager is not None:
+                # Send actions through input manager
+                for action in actions:
+                    if action in ['LEFT', 'RIGHT', 'UP', 'DOWN', 'A', 'B', 'C', 'START']:
+                        self.input_manager.send_action(action, duration=0.016)
+                        print(f"[SonicEmulator-{self.instance_id}] Sent action via input manager: {action}")
+            else:
+                # Fallback to Lua bridge
+                input_commands = []
                 
-                print(f"[SonicEmulator-{self.instance_id}] Sent inputs via Lua bridge: {inputs_str}")
-            
-            # Small delay to let inputs take effect
-            time.sleep(0.016)
+                # Reset all inputs first
+                self.memory_reader._send_command("ACTION:RESET_INPUTS")
+                
+                # Set the requested inputs to true
+                for action in actions:
+                    if action in ['LEFT', 'RIGHT', 'UP', 'DOWN', 'A', 'B', 'C', 'START']:
+                        input_commands.append(f"{action}:true")
+                
+                if input_commands:
+                    # Send inputs to Lua bridge
+                    inputs_str = "|".join(input_commands)
+                    self.memory_reader._send_command(f"ACTION:SET_INPUTS|INPUTS:{inputs_str}")
+                    
+                    print(f"[SonicEmulator-{self.instance_id}] Sent inputs via Lua bridge: {inputs_str}")
+                
+                # Small delay to let inputs take effect
+                time.sleep(0.016)
             
         except Exception as e:
-            print(f"[SonicEmulator-{self.instance_id}] Lua bridge input error: {e}")
+            print(f"[SonicEmulator-{self.instance_id}] Input error: {e}")
             # Fallback: just wait
             time.sleep(0.016)
     
     def reset(self):
         """Reset the emulator to the beginning of the game."""
         try:
-            # Use input isolation system for reset
-            print(f"[SonicEmulator-{self.instance_id}] Using input isolation for reset")
+            # Use input manager for reset if available
             if self.input_manager is not None:
+                print(f"[SonicEmulator-{self.instance_id}] Using input manager for reset")
                 # Send multiple START presses to reset
                 for _ in range(3):
                     self.input_manager.send_action('START', duration=0.2)
                     time.sleep(0.1)
             else:
-                print(f"[SonicEmulator-{self.instance_id}] No input manager available, cannot reset")
+                # Fallback to Lua bridge
+                print(f"[SonicEmulator-{self.instance_id}] Using Lua bridge for reset")
+                self.memory_reader._send_command("ACTION:RESET_INPUTS")
+                # Send START command
+                self.memory_reader._send_command("ACTION:SET_INPUTS|INPUTS:START:true")
+                time.sleep(0.2)
+                self.memory_reader._send_command("ACTION:RESET_INPUTS")
         except Exception as e:
-            print(f"Reset failed: {e}")
+            print(f"[SonicEmulator-{self.instance_id}] Reset failed: {e}")
             # Fallback: just wait
             time.sleep(2)
         
@@ -700,3 +716,14 @@ class SonicEmulator:
         except Exception as e:
             print(f"[SonicEmulator-{self.instance_id}] Memory read error for {key} at {address:x}: {e}")
             return 0 
+
+    def _init_input_manager(self):
+        """Initialize the input manager if it hasn't been initialized yet."""
+        if self.input_manager is None:
+            try:
+                # Use instance-specific input manager
+                self.input_manager = get_input_manager(num_instances=4, instance_id=self.instance_id)
+                print(f"[SonicEmulator-{self.instance_id}] Input manager initialized for instance {self.instance_id}")
+            except Exception as e:
+                print(f"[SonicEmulator-{self.instance_id}] Failed to initialize input manager: {e}")
+                self.input_manager = None 

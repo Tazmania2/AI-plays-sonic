@@ -362,9 +362,10 @@ def train_agent(agent, env, config, callbacks, logger, log_dir=None, mode='basel
     session_data["end_time"] = datetime.now().isoformat()
     session_data["duration_seconds"] = time.time() - start_time
     session_data["total_episodes"] = episode
-    
+
     # Log session summary
     log_training_session_summary(session_data, session_summary_filename)
+    log_experiment_result(session_data)
     
     print(f"Training completed!")
     print(f"Session summary saved to: {session_summary_filename}")
@@ -502,6 +503,34 @@ def log_training_session_summary(session_data, filename):
     """Log complete training session summary to JSON."""
     with open(filename, 'w') as f:
         json.dump(session_data, f, indent=2)
+
+
+def log_experiment_result(session_data, filename: str = "logs/experiment_results.csv"):
+    """Append high-level session metrics for later comparison."""
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    file_exists = os.path.exists(filename)
+    fieldnames = [
+        "timestamp",
+        "mode",
+        "objective_completed",
+        "final_progress",
+        "total_episodes",
+        "total_reward",
+        "duration_seconds",
+    ]
+    with open(filename, "a", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({
+            "timestamp": datetime.now().isoformat(),
+            "mode": session_data.get("mode"),
+            "objective_completed": session_data.get("objective_completed"),
+            "final_progress": session_data.get("final_progress"),
+            "total_episodes": session_data.get("total_episodes"),
+            "total_reward": session_data.get("total_reward"),
+            "duration_seconds": session_data.get("duration_seconds"),
+        })
 
 
 def main():

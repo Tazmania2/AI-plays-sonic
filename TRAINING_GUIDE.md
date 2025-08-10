@@ -433,6 +433,15 @@ free -h
 ps aux | grep python
 ```
 
+## 🧪 A/B Testing Framework
+
+The project supports rigorous comparison between the baseline reward and the shaping-based approach:
+
+1. Use the same configuration file for both modes (`configs/training_config.yaml`).
+2. Run training with `--reward_mode baseline` and `--reward_mode shaping` or `--reward_mode both` for parallel tests.
+3. Each run writes a summary row to `logs/experiment_results.csv` containing high‑level metrics such as total reward, episodes, completion status, and duration.
+4. Compare entries in this file to evaluate which reward strategy performs better under identical conditions.
+
 ## 🎯 Success Metrics
 
 ### Primary Metrics

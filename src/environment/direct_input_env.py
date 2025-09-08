@@ -13,7 +13,6 @@ from emulator.sonic_emulator import SonicEmulator
 from src.utils.reward_calculator import RewardCalculator
 from src.utils.observation_processor import ObservationProcessor
 from src.utils.direct_input_manager import get_direct_input_manager
-from src.utils.input_isolator import get_input_manager as get_file_input_manager
 
 # Global environment counter for input isolation (thread-safe)
 _env_counter = 0
@@ -59,9 +58,8 @@ class DirectInputSonicEnvironment(gym.Env):
             instance_id=instance_id
         )
         
-        # Initialize input managers
+        # Initialize direct input manager only
         self.direct_input_manager = get_direct_input_manager(num_instances=4)
-        self.file_input_manager = get_file_input_manager(num_instances=4)
         
         # Set environment ID for input isolation
         if self.direct_input_manager:
@@ -70,10 +68,7 @@ class DirectInputSonicEnvironment(gym.Env):
         else:
             print(f"[DirectInputSonicEnvironment-{self.env_id}] Warning: Direct input manager not available")
         
-        if self.file_input_manager:
-            print(f"[DirectInputSonicEnvironment-{self.env_id}] File input manager initialized (fallback)")
-        else:
-            print(f"[DirectInputSonicEnvironment-{self.env_id}] Warning: File input manager not available")
+        # File-based input removed; no fallback
         
         # Set environment ID for emulator
         self.emulator.set_env_id(self.env_id)

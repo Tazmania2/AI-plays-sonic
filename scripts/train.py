@@ -37,7 +37,7 @@ from utils.observation_processor import SonicSpecificProcessor
 from utils.reward_calculator import SonicSpecificRewardCalculator
 from visualization.training_visualizer import TrainingVisualizer
 from environment.hierarchical_shaping_wrapper import HierarchicalShapingWrapper
-from utils.input_isolator import get_input_manager, shutdown_input_manager
+# No input manager needed with Stable-Retro
 
 # Global variables for cleanup
 current_agent = None
@@ -68,7 +68,7 @@ def cleanup_resources():
     
     # Shutdown input manager
     try:
-        shutdown_input_manager()
+        pass  # no-op (Stable-Retro)
         print("✅ Input manager shutdown")
     except Exception as e:
         print(f"⚠️  Error shutting down input manager: {e}")
@@ -565,8 +565,8 @@ def main():
     try:
         # Initialize input manager for multiple environments (only for single process)
         if args.num_envs > 1 and args.reward_mode != "both":
-            input_manager = get_input_manager(args.num_envs)
-            logger.info(f"Initialized input manager for {args.num_envs} environments")
+            # Stable-Retro: no input manager required
+            logger.info("Stable-Retro: no input manager required")
         
         # Create environments
         logger.info("Creating training environment(s)...")
@@ -662,8 +662,8 @@ def main():
     finally:
         # Cleanup input manager (only if created in main process)
         if args.num_envs > 1 and args.reward_mode != "both":
-            shutdown_input_manager()
-            logger.info("Input manager shutdown complete")
+            pass  # no-op (Stable-Retro)
+            logger.info("Stable-Retro: no input manager cleanup needed")
         
         # Clear global variables
         current_agent = None

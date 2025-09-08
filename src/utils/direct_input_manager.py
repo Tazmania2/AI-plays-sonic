@@ -220,6 +220,36 @@ class DirectInputManager:
         """Send multiple actions to the target window."""
         for action in actions:
             self.send_action(action, duration)
+
+    def send_combo(self, actions: List[str], duration: float = 0.016):
+        """Send a combination of actions simultaneously (press together, then release together)."""
+        # Translate actions to vk codes
+        vk_codes = []
+        for action in actions:
+            vk = self.action_to_vk.get(action.upper())
+            if vk:
+                vk_codes.append(vk)
+
+        if not vk_codes:
+            time.sleep(duration)
+            return
+
+        # Press all keys down
+        for vk in vk_codes:
+            try:
+                self._send_input_to_window(vk, True)
+            except Exception:
+                pass
+
+        # Hold
+        time.sleep(duration)
+
+        # Release all keys
+        for vk in vk_codes:
+            try:
+                self._send_input_to_window(vk, False)
+            except Exception:
+                pass
     
     def clear_queue(self):
         """Clear the input queue."""
@@ -267,6 +297,14 @@ class MultiInstanceDirectInputManager:
         if env_id in self.env_to_instance:
             instance_id = self.env_to_instance[env_id]
             self.input_managers[instance_id].send_actions(actions, duration)
+        else:
+            print(f"[MultiInstanceDirectInputManager] Environment {env_id} not assigned to any instance")
+
+    def send_combo(self, env_id: int, actions: List[str], duration: float = 0.016):
+        """Send simultaneous actions to the specific environment's input instance."""
+        if env_id in self.env_to_instance:
+            instance_id = self.env_to_instance[env_id]
+            self.input_managers[instance_id].send_combo(actions, duration)
         else:
             print(f"[MultiInstanceDirectInputManager] Environment {env_id} not assigned to any instance")
     

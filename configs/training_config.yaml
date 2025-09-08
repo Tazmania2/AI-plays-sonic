@@ -5,6 +5,8 @@
 game:
   name: "sonic1"  # sonic1, sonic2, sonic3
   rom_path: "roms/sonic1.md"  # Use the working ROM file
+  retro_game: "SonicTheHedgehog-Genesis"  # Stable-Retro game ID
+  retro_state: "GreenHillZone.Act1"       # Default starting state
   frame_skip: 4  # Skip frames for faster training
   max_steps: 12000  # Reduced since we're only doing Green Hill Zone
   render: false  # Render during training
@@ -135,10 +137,6 @@ evaluation:
   render: true
 
 # Emulator Settings - BizHawk Configuration
-emulator:
-  bizhawk_dir: "C:\\Program Files (x86)\\BizHawk-2.10-win-x64"
-  lua_script_path: "emulator/bizhawk_bridge_fixed.lua"
-  window_size: [800, 600]
-  fullscreen: false
-  audio: false  # Disable audio for faster training
-  port: 55555  # Default port for file-based communication 
+# Emulator section no longer needed with Stable-Retro
+# emulator:
+#   backend: "stable-retro"

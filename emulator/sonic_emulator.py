@@ -1,305 +1,195 @@
 import numpy as np
-import cv2
 import time
-import subprocess
 import os
-import json
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
-import threading
-import queue
-from src.utils.bizhawk_memory_file import BizHawkMemoryReaderFile
-from src.utils.input_isolator import get_input_manager
 
-# For screen capture (cross-platform)
+# Stable-Retro (maintained fork of gym-retro) exposes the same "retro" API
 try:
-    import mss
-    import mss.tools
-    MSS_AVAILABLE = True
-except ImportError:
-    MSS_AVAILABLE = False
+    import retro  # provided by stable-retro
+except Exception as e:
+    retro = None
+    print(f"[SonicEmulator] Warning: retro (stable-retro) not available: {e}")
 
 
 class SonicEmulator:
     """
-    Wrapper for Sonic game emulator.
-    
-    This class provides a unified interface to control Sonic games
-    through various emulators (BizHawk, RetroArch, etc.).
+    Stable-Retro based Sonic emulator wrapper (Colab friendly).
+    - No external windows, no BizHawk, no Lua bridge.
+    - Buttons are sent as a multi-binary vector in a single step.
     """
-    
-    def __init__(self, rom_path: str, bizhawk_dir: str, lua_script_path: str, port: int = 55555, instance_id: int = 0):
-        self.rom_path = Path(rom_path)
-        self.bizhawk_dir = bizhawk_dir
-        self.lua_script_path = lua_script_path
-        # self.port = port  # DEPRECATED: No longer used with file-based communication
+
+    # Default Genesis button order used by Retro
+    DEFAULT_BUTTONS = ['B', 'C', 'A', 'START', 'UP', 'DOWN', 'LEFT', 'RIGHT']
+    ACTION_ALIASES = {
+        'NOOP': [],
+        'LEFT': ['LEFT'],
+        'RIGHT': ['RIGHT'],
+        'UP': ['UP'],
+        'DOWN': ['DOWN'],
+        'A': ['A'],
+        'B': ['B'],
+        'C': ['C'],
+        'START': ['START'],
+        'SELECT': ['START'],  # no SELECT on Genesis; map to START if used
+    }
+
+    def __init__(
+        self,
+        rom_path: str = '',
+        bizhawk_dir: str = '',
+        lua_script_path: str = '',
+        port: int = 0,
+        instance_id: int = 0,
+        retro_game: str = 'SonicTheHedgehog-Genesis',
+        retro_state: str = 'GreenHillZone.Act1',
+        frame_skip: int = 1,
+        render: bool = False,
+    ):
         self.instance_id = instance_id
-        self.process = None
-        self.memory_reader = BizHawkMemoryReaderFile(instance_id=instance_id)
-        
-        # Screen capture
-        self.screen_capture = None
-        self.capture_region = None
-        self.screen_width = 224
-        self.screen_height = 256
-        
-        # Initialize screen capture
-        if MSS_AVAILABLE:
-            try:
-                self.screen_capture = mss.mss()
-                # Default capture region (will be updated when window is found)
-                self.capture_region = {"top": 0, "left": 0, "width": self.screen_width, "height": self.screen_height}
-                print(f"[SonicEmulator-{self.instance_id}] Screen capture initialized with MSS")
-            except Exception as e:
-                print(f"[SonicEmulator-{self.instance_id}] Failed to initialize MSS: {e}")
-                self.screen_capture = None
-                self.capture_region = None
-        else:
-            print(f"[SonicEmulator-{self.instance_id}] MSS not available, screen capture disabled")
-        
-        # Input control - use ONLY isolated input system
-        self.input_manager = None  # Will be initialized when needed
-        # self.env_id = None  # DEPRECATED: Not needed with file-based system
-        
-        # Game state memory addresses (Sonic 1 actual addresses)
-        self.memory_addresses = {
-            'score': 0xFFE000,      # Score (4 bytes)
-            'rings': 0xFFE002,      # Rings (2 bytes)
-            'lives': 0xFFE004,      # Lives (2 bytes)
-            'level': 0xFFE006,      # Current level (2 bytes)
-            'position_x': 0xFFD030, # Sonic X position (2 bytes, signed)
-            'position_y': 0xFFD038, # Sonic Y position (2 bytes, signed)
-            'game_state': 0xFFE00C, # Game state/status (2 bytes)
-            'invincibility': 0xFFE00E, # Invincibility timer (2 bytes)
-            'speed': 0xFFD040,      # Sonic speed (2 bytes)
-            'timer': 0xFFE010,      # Level timer (2 bytes)
-            'zone': 0xFFE012,       # Current zone (2 bytes)
-            'act': 0xFFE014,        # Current act (2 bytes)
-            'shields': 0xFFE016,    # Shield status (2 bytes)
-            'speed_shoes': 0xFFE018, # Speed shoes timer (2 bytes)
-            'air_remaining': 0xFFE01A, # Air remaining underwater (2 bytes)
-            'lamppost_counter': 0xFFE01C, # Lamppost counter (2 bytes)
-            'emeralds': 0xFFE01E,   # Chaos emeralds collected (2 bytes)
-            'angle': 0xFFD042,      # Sonic's angle (2 bytes)
-            'status': 0xFFD044,     # Sonic's status (2 bytes)
-            'level_timer_frames': 0xFFE020  # Level timer in frames (2 bytes)
-        }
-        
-        # Memory address validation ranges
-        self.memory_ranges = {
-            'score': (0, 999999),           # Score range
-            'rings': (0, 999),              # Rings range
-            'lives': (0, 99),               # Lives range
-            'level': (0, 15),               # Level range
-            'position_x': (-32768, 32767),  # Signed 16-bit
-            'position_y': (-32768, 32767),  # Signed 16-bit
-            'game_state': (0, 65535),       # Unsigned 16-bit
-            'invincibility': (0, 65535),    # Timer range
-            'speed': (-32768, 32767),       # Signed 16-bit
-            'timer': (0, 65535),            # Timer range
-            'zone': (0, 15),                # Zone range
-            'act': (0, 3),                  # Act range
-            'shields': (0, 65535),          # Shield timer
-            'speed_shoes': (0, 65535),      # Speed shoes timer
-            'air_remaining': (0, 65535),    # Air timer
-            'lamppost_counter': (0, 255),   # Counter range
-            'emeralds': (0, 7),             # Emerald count
-            'angle': (0, 255),              # Angle range
-            'status': (0, 255),             # Status flags
-            'level_timer_frames': (0, 65535) # Frame timer
-        }
-        
-        # Initialize emulator
-        self.launch()
-        
-        # Update capture region after launch
-        self._update_capture_region()
-        
-        # Initialize input manager
-        self._init_input_manager()
-    
+        self.retro_game = retro_game
+        self.retro_state = retro_state
+        self.frame_skip = max(1, int(frame_skip))
+        self.render_enabled = render
+
+        self.env: Optional[retro.RetroEnv] = None if retro is None else retro.make(
+            game=self.retro_game,
+            state=self.retro_state,
+            use_restricted_actions=retro.Actions.DISCRETE  # still returns multi-binary buttons
+        )
+
+        if self.env is None:
+            raise RuntimeError("stable-retro not available or game/state not found. Make sure to pip install stable-retro and import ROMs with `python -m retro.import roms/`.")
+
+        self.last_obs: Optional[np.ndarray] = None
+        self.last_info: Dict[str, Any] = {}
+        self.prev_info: Dict[str, Any] = {}
+        self.last_speed_x: float = 0.0
+        self.obs_shape = self.env.observation_space.shape
+        self.buttons = list(self.DEFAULT_BUTTONS)
+        self.button_to_idx = {b: i for i, b in enumerate(self.buttons)}
+        self.reset()
+
     def set_env_id(self, env_id: int):
-        """Set the environment ID for input isolation."""
-        # self.env_id = env_id  # DEPRECATED: Not needed with file-based system
-        
-        # Initialize input manager if not already done (shared per process)
-        if self.input_manager is None:
-            try:
-                # Use a shared input manager for this process
-                # The input manager should already be created by the main process
-                self.input_manager = get_input_manager(num_instances=4)  # Support up to 4 instances
-                print(f"[SonicEmulator-{self.instance_id}] Input manager initialized")
-            except Exception as e:
-                print(f"[SonicEmulator-{self.instance_id}] Failed to initialize input manager: {e}")
-                self.input_manager = None
-        
-        # Assign environment to input manager
-        if self.input_manager is not None:
-            try:
-                # self.input_manager.assign_environment(env_id, self.instance_id)  # DEPRECATED: Not needed with file-based system
-                print(f"[SonicEmulator-{self.instance_id}] Assigned to environment {env_id}")
-            except Exception as e:
-                print(f"[SonicEmulator-{self.instance_id}] Failed to assign environment: {e}")
-        else:
-            print(f"[SonicEmulator-{self.instance_id}] Warning: No input manager available")
-        
-    def launch(self):
-        if self.process:
-            self.close()
-        
-        # Set environment variable for instance ID
-        env = os.environ.copy()
-        env['BIZHAWK_INSTANCE_ID'] = str(self.instance_id)
-        # Share base directory for communication files with Lua script
-        env['BIZHAWK_COMM_BASE'] = os.getcwd()
-        
-        cmd = [
-            os.path.join(self.bizhawk_dir, "EmuHawk.exe"),
-            f"--lua={self.lua_script_path}",
-            str(self.rom_path)
-        ]
-        print(f"[SonicEmulator-{self.instance_id}] Launching BizHawk with command: {' '.join(cmd)}")
-        self.process = subprocess.Popen(cmd, env=env)
-        time.sleep(5)  # Wait for BizHawk to start
-    
-    def read_memory(self, address, size):
-        return self.memory_reader.read_memory(address, size)
-    
+        # API compatibility; not required for Retro
+        pass
+
     def close(self):
-        if self.process:
-            self.process.terminate()
-            self.process.wait()
-            self.process = None
-    
+        try:
+            if self.env is not None:
+                self.env.close()
+        except Exception:
+            pass
+        self.env = None
+
+    def _actions_to_vector(self, actions: List[str]) -> np.ndarray:
+        vec = np.zeros(len(self.buttons), dtype=np.uint8)
+        for a in actions:
+            keys = self.ACTION_ALIASES.get(a.upper(), [a.upper()])
+            for k in keys:
+                idx = self.button_to_idx.get(k)
+                if idx is not None:
+                    vec[idx] = 1
+        return vec
+
+    def reset(self) -> np.ndarray:
+        obs, info = self.env.reset()
+        self.prev_info = {}
+        self.last_info = info or {}
+        self.last_speed_x = 0.0
+        self.last_obs = obs
+        return obs
+
     def get_screen(self) -> np.ndarray:
-        """Capture the current screen from the emulator."""
-        if not self.screen_capture or not self.capture_region:
-            # Return a blank image if screen capture is not available
-            print(f"[SonicEmulator-{self.instance_id}] Screen capture not available, returning blank image")
-            return np.zeros((self.screen_height, self.screen_width, 3), dtype=np.uint8)
-        
-        try:
-            # Capture screen region
-            screenshot = self.screen_capture.grab(self.capture_region)
-            
-            # Convert to numpy array
-            img = np.array(screenshot)
-            
-            # Convert from BGRA to BGR
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-            
-            # Resize to target dimensions
-            img = cv2.resize(img, (self.screen_width, self.screen_height))
-            
-            return img
-        except Exception as e:
-            print(f"[SonicEmulator-{self.instance_id}] Screen capture error: {e}")
-            # Return a blank image on error
-            return np.zeros((self.screen_height, self.screen_width, 3), dtype=np.uint8)
-    
+        return self.last_obs.copy() if self.last_obs is not None else np.zeros(self.obs_shape, dtype=np.uint8)
+
     def step(self, actions: List[str]):
-        """Execute actions in the emulator using input manager."""
         if not actions:
-            return
-        
+            actions = ['NOOP']
+
+        action_vec = self._actions_to_vector(actions)
+        total_reward = 0.0
+        info_agg = {}
+        done = False
+        obs = None
+
+        # Simple frame-skip: repeat same action
+        for i in range(self.frame_skip):
+            obs, reward, terminated, truncated, info = self.env.step(action_vec)
+            done = bool(terminated or truncated)
+            total_reward += float(reward)
+            # capture the latest info
+            info_agg = info
+            if done:
+                break
+
+        self.last_obs = obs
         try:
-            # Use input manager if available
-            if self.input_manager is not None:
-                # Send actions through input manager
-                for action in actions:
-                    if action in ['LEFT', 'RIGHT', 'UP', 'DOWN', 'A', 'B', 'C', 'START']:
-                        self.input_manager.send_action(action, duration=0.016)
-                        print(f"[SonicEmulator-{self.instance_id}] Sent action via input manager: {action}")
-            else:
-                # Fallback to Lua bridge
-                input_commands = []
-                
-                # Reset all inputs first
-                self.memory_reader._send_command("ACTION:RESET_INPUTS")
-                
-                # Set the requested inputs to true
-                for action in actions:
-                    if action in ['LEFT', 'RIGHT', 'UP', 'DOWN', 'A', 'B', 'C', 'START']:
-                        input_commands.append(f"{action}:true")
-                
-                if input_commands:
-                    # Send inputs to Lua bridge
-                    inputs_str = "|".join(input_commands)
-                    self.memory_reader._send_command(f"ACTION:SET_INPUTS|INPUTS:{inputs_str}")
-                    
-                    print(f"[SonicEmulator-{self.instance_id}] Sent inputs via Lua bridge: {inputs_str}")
-                
-                # Small delay to let inputs take effect
-                time.sleep(0.016)
-            
-        except Exception as e:
-            print(f"[SonicEmulator-{self.instance_id}] Input error: {e}")
-            # Fallback: just wait
-            time.sleep(0.016)
-    
-    def reset(self):
-        """Reset the emulator to the beginning of the game."""
-        try:
-            # Use input manager for reset if available
-            if self.input_manager is not None:
-                print(f"[SonicEmulator-{self.instance_id}] Using input manager for reset")
-                # Send multiple START presses to reset
-                for _ in range(3):
-                    self.input_manager.send_action('START', duration=0.2)
-                    time.sleep(0.1)
-            else:
-                # Fallback to Lua bridge
-                print(f"[SonicEmulator-{self.instance_id}] Using Lua bridge for reset")
-                self.memory_reader._send_command("ACTION:RESET_INPUTS")
-                # Send START command
-                self.memory_reader._send_command("ACTION:SET_INPUTS|INPUTS:START:true")
-                time.sleep(0.2)
-                self.memory_reader._send_command("ACTION:RESET_INPUTS")
-        except Exception as e:
-            print(f"[SonicEmulator-{self.instance_id}] Reset failed: {e}")
-            # Fallback: just wait
-            time.sleep(2)
-        
-        # Wait for reset to complete
-        time.sleep(2)
-    
-    def save_state(self, path: str):
-        """Save the current game state."""
-        if self.input_manager is not None:
-            self.input_manager.send_action('F5', duration=0.1)
-        else:
-            print(f"[SonicEmulator-{self.instance_id}] No input manager available, cannot save state")
-        
-        # Wait for save to complete
-        time.sleep(0.5)
-    
-    def load_state(self, path: str):
-        """Load a saved game state using input isolation."""
-        if self.input_manager is not None:
-            self.input_manager.send_action('F7', duration=0.1)
-        else:
-            print(f"[SonicEmulator-{self.instance_id}] Warning: No input manager available, skipping load")
-        
-        # Wait for load to complete
-        time.sleep(0.5)
-    
-    def __del__(self):
-        """Cleanup when object is destroyed."""
-        self.close()
-    
-    def _detect_act_clear_screen(self) -> bool:
-        """Detect if we're in the ACT CLEAR screen."""
-        try:
-            # This would require screen capture and image analysis
-            # For now, return False as a placeholder
-            # In a real implementation, you would:
-            # 1. Capture the screen
-            # 2. Look for "ACT CLEAR" text or specific visual patterns
-            # 3. Check for the characteristic end-of-act music/sounds
-            return False
-        except Exception as e:
-            print(f"Error detecting act clear screen: {e}")
-            return False
+            # compute simple speed from x delta if present
+            prev_x = float(self.last_info.get('x', 0) or 0)
+            curr_x = float((info_agg or {}).get('x', 0) or 0)
+            self.last_speed_x = curr_x - prev_x
+        except Exception:
+            self.last_speed_x = 0.0
+        self.prev_info = self.last_info
+        self.last_info = info_agg or {}
+        return obs, total_reward, done, info_agg
+
+    # Minimal game state extraction (best-effort; many values may be 0 without custom scenarios)
+    def get_game_state(self) -> Dict[str, Any]:
+        state = {
+            'position': (0, 0),
+            'position_x': 0,
+            'position_y': 0,
+            'velocity': (0, 0),
+            'rings': 0,
+            'rings_count': 0,
+            'score': 0,
+            'lives': 3,
+            'zone': 0,
+            'act': 0,
+            'zone_act': (0, 0),
+            'game_mode': 0,
+            'game_mode_name': 'Unknown',
+            'timer': (0, 0, 0),
+            'invincibility': False,
+            'shield': False,
+            'speed_shoes': False,
+            'air_remaining': 0,
+            'lamppost_counter': 0,
+            'emeralds': 0,
+            'angle': 0,
+            'status': {'on_ground': False, 'in_air': False, 'underwater': False, 'on_object': False},
+            'level_timer_frames': 0,
+            'speed': float(self.last_speed_x),
+            'on_ground': False,
+            'in_air': False,
+            'underwater': False,
+            'on_object': False
+        }
+        # Prefer scenario-provided info keys (more reliable than raw RAM)
+        info = self.last_info or {}
+        x = int(info.get('x', 0) or 0)
+        y = int(info.get('y', 0) or 0)
+        rings = int(info.get('rings', info.get('ring', 0) or 0))
+        lives = int(info.get('lives', 0) or 0)
+        score = int(info.get('score,', info.get('score', 0) or 0))
+        zone = int(info.get('zone', 0) or 0)
+        act = int(info.get('act', 0) or 0)
+
+        state.update({
+            'position': (x, y),
+            'position_x': x,
+            'position_y': y,
+            'rings': rings,
+            'rings_count': rings,
+            'lives': lives if lives > 0 else state['lives'],
+            'score': score,
+            'zone': zone,
+            'act': act,
+            'zone_act': (zone, act),
+        })
+        return state
 
     def _get_sonic_position(self):
         try:
@@ -718,12 +608,12 @@ class SonicEmulator:
             return 0 
 
     def _init_input_manager(self):
-        """Initialize the input manager if it hasn't been initialized yet."""
+        """Initialize the direct input manager for this instance."""
         if self.input_manager is None:
             try:
-                # Use instance-specific input manager
-                self.input_manager = get_input_manager(num_instances=4, instance_id=self.instance_id)
-                print(f"[SonicEmulator-{self.instance_id}] Input manager initialized for instance {self.instance_id}")
+                self.input_manager = DirectInputManager(self.instance_id)
+                self.input_manager.start()
+                print(f"[SonicEmulator-{self.instance_id}] Direct input manager initialized for instance {self.instance_id}")
             except Exception as e:
-                print(f"[SonicEmulator-{self.instance_id}] Failed to initialize input manager: {e}")
+                print(f"[SonicEmulator-{self.instance_id}] Failed to initialize direct input manager: {e}")
                 self.input_manager = None 

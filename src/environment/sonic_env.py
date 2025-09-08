@@ -12,7 +12,7 @@ import threading
 from emulator.sonic_emulator import SonicEmulator
 from utils.reward_calculator import RewardCalculator
 from utils.observation_processor import ObservationProcessor
-from utils.input_isolator import get_input_manager
+# Using direct input via SonicEmulator; no file-based input manager
 
 # Global environment counter for input isolation (thread-safe)
 _env_counter = 0
@@ -44,26 +44,19 @@ class SonicEnvironment(gym.Env):
         self.obs_config = config['observation']
         self.action_config = config['actions']
         
-        # Initialize emulator with instance ID
-        emulator_config = config.get('emulator', {})
-        core_path = emulator_config.get('core', 'genesis_plus_gx_libretro.dll')
-        
-        # Use env_id as instance_id for input isolation
-        instance_id = self.env_id % 4  # Distribute across 4 instances
-        
+        # Initialize Retro-based emulator (Stable-Retro)
+        instance_id = self.env_id % 4
+        retro_game = self.game_config.get('retro_game', 'SonicTheHedgehog-Genesis')
+        retro_state = self.game_config.get('retro_state', 'GreenHillZone.Act1')
+        frame_skip = self.game_config.get('frame_skip', 1)
+
         self.emulator = SonicEmulator(
-            rom_path=self.game_config['rom_path'],
-            bizhawk_dir=config.get('bizhawk_dir', r"C:\Program Files (x86)\BizHawk-2.10-win-x64"),
-            lua_script_path=config.get('lua_script_path', 'emulator/bizhawk_bridge.lua'),  # Fixed: use correct script name
-            instance_id=instance_id
+            instance_id=instance_id,
+            retro_game=retro_game,
+            retro_state=retro_state,
+            frame_skip=frame_skip,
+            render=self.config['game'].get('render', False),
         )
-        
-        # Initialize input manager for this environment
-        self.input_manager = get_input_manager(num_instances=4, instance_id=instance_id)
-        if self.input_manager:
-            print(f"[SonicEnvironment-{self.env_id}] Input manager initialized for instance {instance_id}")
-        else:
-            print(f"[SonicEnvironment-{self.env_id}] Warning: Input manager not available")
         
         # Set environment ID for input isolation
         self.emulator.set_env_id(self.env_id)
